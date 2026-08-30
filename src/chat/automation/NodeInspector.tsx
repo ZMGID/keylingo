@@ -1,26 +1,55 @@
-import { FieldBlock, Select } from '../../settings/components'
+import type { ReactNode } from 'react'
+import { Play } from 'lucide-react'
+import { Button } from '../../components/Button'
+import { FieldBlock, Select, Toggle } from '../../settings/components'
 import { useT } from '../../settings/i18n'
 import { catalogEntry } from './nodeCatalog'
-import type { FlowNode } from './types'
+import { isTriggerType, type FlowNode, type IfOp } from './types'
+
+function InspectorSection({ title, children }: { title: string, children: ReactNode }) {
+  return (
+    <section className="kv-automation-inspector-section">
+      <h3>{title}</h3>
+      {children}
+    </section>
+  )
+}
 
 export function NodeInspector({
   node,
   onChange,
+  onExecuteStep,
+  running,
+  lastOutput,
 }: {
   node: FlowNode
   onChange: (next: FlowNode) => void
+  onExecuteStep?: () => void
+  running?: boolean
+  lastOutput?: string
 }) {
   const t = useT()
   const entry = catalogEntry(node.type)
   const Icon = entry?.icon
   const patchData = (data: FlowNode['data']) => onChange({ ...node, data })
-  const kind = node.type.startsWith('trigger.')
+  const kind = isTriggerType(node.type)
     ? t.chatAutomationKindTrigger
-    : t.chatAutomationKindAction
+    : node.type === 'logic.if'
+      ? t.chatAutomationKindLogic
+      : t.chatAutomationKindAction
+  const usesTemplates = node.type === 'action.agent'
+    || node.type === 'action.notify'
+    || node.type === 'action.http'
+  const hasParams = node.type === 'trigger.schedule'
+    || node.type === 'trigger.hotkey'
+    || node.type === 'action.agent'
+    || node.type === 'action.notify'
+    || node.type === 'action.http'
+    || node.type === 'logic.if'
 
   return (
     <aside className="kv-automation-inspector">
-      <div className="kv-automation-inspector-head">
+      <header className="kv-automation-inspector-head">
         {Icon ? (
           <span className="kv-automation-inspector-icon" aria-hidden>
             <Icon size={16} strokeWidth={1.75} />
@@ -30,148 +59,294 @@ export function NodeInspector({
           <div className="kv-automation-inspector-kicker">{kind}</div>
           <h2 className="kv-automation-inspector-title">{node.data.label}</h2>
         </div>
-      </div>
+      </header>
 
-      {node.type === 'trigger.manual' ? (
-        <p className="kv-automation-inspector-copy">{t.chatAutomationTriggerManualHint}</p>
+      {entry ? (
+        <p className="kv-automation-inspector-lead">{entry.hint(t)}</p>
       ) : null}
 
-      {node.type === 'trigger.schedule' ? (
-        <>
-          <FieldBlock label={t.chatAutomationScheduleKind}>
-            <Select
-              value={node.data.schedule?.kind ?? 'daily'}
-              onChange={(kindValue) =>
-                patchData({
-                  ...node.data,
-                  schedule: {
-                    kind: kindValue as 'daily' | 'weekdays' | 'interval',
-                    hour: node.data.schedule?.hour ?? 9,
-                    minute: node.data.schedule?.minute ?? 0,
-                    intervalMinutes: node.data.schedule?.intervalMinutes ?? 60,
-                  },
-                })
-              }
-              options={[
-                { value: 'daily', label: t.chatAutomationScheduleDaily },
-                { value: 'weekdays', label: t.chatAutomationScheduleWeekdays },
-                { value: 'interval', label: t.chatAutomationScheduleInterval },
-              ]}
-            />
-          </FieldBlock>
-          {node.data.schedule?.kind === 'interval' ? (
-            <FieldBlock label={t.chatAutomationScheduleEvery}>
-              <input
-                className="kv-input"
-                type="number"
-                min={5}
-                max={1440}
-                value={node.data.schedule.intervalMinutes}
-                onChange={(event) =>
-                  patchData({
-                    ...node.data,
-                    schedule: {
-                      ...node.data.schedule!,
-                      intervalMinutes: Number(event.target.value) || 60,
-                    },
-                  })
-                }
-              />
-            </FieldBlock>
-          ) : (
-            <FieldBlock label={t.chatAutomationScheduleTime}>
-              <div className="kv-automation-time">
-                <input
-                  className="kv-input"
-                  type="number"
-                  min={0}
-                  max={23}
-                  value={node.data.schedule?.hour ?? 9}
-                  onChange={(event) =>
+      {hasParams ? (
+        <InspectorSection title={t.chatAutomationSectionParams}>
+          {node.type === 'trigger.schedule' ? (
+            <>
+              <FieldBlock label={t.chatAutomationScheduleKind}>
+                <Select
+                  value={node.data.schedule?.kind ?? 'daily'}
+                  onChange={(kindValue) =>
                     patchData({
                       ...node.data,
                       schedule: {
-                        kind: node.data.schedule?.kind ?? 'daily',
-                        hour: Number(event.target.value) || 0,
+                        kind: kindValue as 'daily' | 'weekdays' | 'interval',
+                        hour: node.data.schedule?.hour ?? 9,
                         minute: node.data.schedule?.minute ?? 0,
                         intervalMinutes: node.data.schedule?.intervalMinutes ?? 60,
                       },
                     })
                   }
+                  options={[
+                    { value: 'daily', label: t.chatAutomationScheduleDaily },
+                    { value: 'weekdays', label: t.chatAutomationScheduleWeekdays },
+                    { value: 'interval', label: t.chatAutomationScheduleInterval },
+                  ]}
                 />
-                <span>:</span>
+              </FieldBlock>
+              {node.data.schedule?.kind === 'interval' ? (
+                <FieldBlock label={t.chatAutomationScheduleEvery}>
+                  <input
+                    className="kv-input"
+                    type="number"
+                    min={5}
+                    max={1440}
+                    value={node.data.schedule.intervalMinutes}
+                    onChange={(event) =>
+                      patchData({
+                        ...node.data,
+                        schedule: {
+                          ...node.data.schedule!,
+                          intervalMinutes: Number(event.target.value) || 60,
+                        },
+                      })
+                    }
+                  />
+                </FieldBlock>
+              ) : (
+                <FieldBlock label={t.chatAutomationScheduleTime}>
+                  <div className="kv-automation-time">
+                    <input
+                      className="kv-input"
+                      type="number"
+                      min={0}
+                      max={23}
+                      value={node.data.schedule?.hour ?? 9}
+                      onChange={(event) =>
+                        patchData({
+                          ...node.data,
+                          schedule: {
+                            kind: node.data.schedule?.kind ?? 'daily',
+                            hour: Number(event.target.value) || 0,
+                            minute: node.data.schedule?.minute ?? 0,
+                            intervalMinutes: node.data.schedule?.intervalMinutes ?? 60,
+                          },
+                        })
+                      }
+                    />
+                    <span>:</span>
+                    <input
+                      className="kv-input"
+                      type="number"
+                      min={0}
+                      max={59}
+                      value={node.data.schedule?.minute ?? 0}
+                      onChange={(event) =>
+                        patchData({
+                          ...node.data,
+                          schedule: {
+                            kind: node.data.schedule?.kind ?? 'daily',
+                            hour: node.data.schedule?.hour ?? 9,
+                            minute: Number(event.target.value) || 0,
+                            intervalMinutes: node.data.schedule?.intervalMinutes ?? 60,
+                          },
+                        })
+                      }
+                    />
+                  </div>
+                </FieldBlock>
+              )}
+            </>
+          ) : null}
+
+          {node.type === 'trigger.hotkey' ? (
+            <FieldBlock label={t.chatAutomationHotkey}>
+              <input
+                className="kv-input"
+                value={node.data.hotkey?.accelerator ?? ''}
+                placeholder="Control+Shift+A"
+                onChange={(event) =>
+                  patchData({ ...node.data, hotkey: { accelerator: event.target.value } })
+                }
+              />
+            </FieldBlock>
+          ) : null}
+
+          {node.type === 'action.agent' ? (
+            <FieldBlock label={t.chatAutomationNodePrompt}>
+              <textarea
+                className="kv-textarea"
+                rows={8}
+                value={node.data.agent?.prompt ?? ''}
+                placeholder={t.chatAutomationNodePromptPlaceholder}
+                onChange={(event) =>
+                  patchData({
+                    ...node.data,
+                    agent: { prompt: event.target.value, skillId: node.data.agent?.skillId ?? null },
+                  })
+                }
+              />
+            </FieldBlock>
+          ) : null}
+
+          {node.type === 'action.notify' ? (
+            <FieldBlock label={t.chatAutomationNotifyBody}>
+              <textarea
+                className="kv-textarea"
+                rows={4}
+                value={node.data.notify?.body ?? ''}
+                placeholder={t.chatAutomationNotifyPlaceholder}
+                onChange={(event) => patchData({ ...node.data, notify: { body: event.target.value } })}
+              />
+            </FieldBlock>
+          ) : null}
+
+          {node.type === 'action.http' ? (
+            <>
+              <FieldBlock label={t.chatAutomationHttpMethod}>
+                <Select
+                  value={node.data.http?.method ?? 'GET'}
+                  onChange={(method) =>
+                    patchData({
+                      ...node.data,
+                      http: {
+                        method: method as 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+                        url: node.data.http?.url ?? '',
+                        headers: node.data.http?.headers ?? '',
+                        body: node.data.http?.body ?? '',
+                      },
+                    })
+                  }
+                  options={['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((value) => ({ value, label: value }))}
+                />
+              </FieldBlock>
+              <FieldBlock label={t.chatAutomationHttpUrl}>
                 <input
                   className="kv-input"
-                  type="number"
-                  min={0}
-                  max={59}
-                  value={node.data.schedule?.minute ?? 0}
+                  value={node.data.http?.url ?? ''}
+                  placeholder="https://example.com/hook"
                   onChange={(event) =>
                     patchData({
                       ...node.data,
-                      schedule: {
-                        kind: node.data.schedule?.kind ?? 'daily',
-                        hour: node.data.schedule?.hour ?? 9,
-                        minute: Number(event.target.value) || 0,
-                        intervalMinutes: node.data.schedule?.intervalMinutes ?? 60,
+                      http: {
+                        method: node.data.http?.method ?? 'GET',
+                        url: event.target.value,
+                        headers: node.data.http?.headers ?? '',
+                        body: node.data.http?.body ?? '',
                       },
                     })
                   }
                 />
-              </div>
-            </FieldBlock>
-          )}
-        </>
+              </FieldBlock>
+              <FieldBlock label={t.chatAutomationHttpHeaders}>
+                <textarea
+                  className="kv-textarea"
+                  rows={3}
+                  value={node.data.http?.headers ?? ''}
+                  placeholder={'Authorization: Bearer …\nAccept: application/json'}
+                  onChange={(event) =>
+                    patchData({
+                      ...node.data,
+                      http: {
+                        method: node.data.http?.method ?? 'GET',
+                        url: node.data.http?.url ?? '',
+                        headers: event.target.value,
+                        body: node.data.http?.body ?? '',
+                      },
+                    })
+                  }
+                />
+              </FieldBlock>
+              {(node.data.http?.method ?? 'GET') !== 'GET' ? (
+                <FieldBlock label={t.chatAutomationHttpBody}>
+                  <textarea
+                    className="kv-textarea"
+                    rows={4}
+                    value={node.data.http?.body ?? ''}
+                    placeholder='{"text":"{{output}}"}'
+                    onChange={(event) =>
+                      patchData({
+                        ...node.data,
+                        http: {
+                          method: node.data.http?.method ?? 'POST',
+                          url: node.data.http?.url ?? '',
+                          headers: node.data.http?.headers ?? '',
+                          body: event.target.value,
+                        },
+                      })
+                    }
+                  />
+                </FieldBlock>
+              ) : null}
+            </>
+          ) : null}
+
+          {node.type === 'logic.if' ? (
+            <>
+              <FieldBlock label={t.chatAutomationIfOp}>
+                <Select
+                  value={node.data.if?.op ?? 'contains'}
+                  onChange={(op) =>
+                    patchData({
+                      ...node.data,
+                      if: { op: op as IfOp, value: node.data.if?.value ?? '' },
+                    })
+                  }
+                  options={[
+                    { value: 'contains', label: t.chatAutomationIfContains },
+                    { value: 'equals', label: t.chatAutomationIfEquals },
+                    { value: 'notEmpty', label: t.chatAutomationIfNotEmpty },
+                  ]}
+                />
+              </FieldBlock>
+              {(node.data.if?.op ?? 'contains') !== 'notEmpty' ? (
+                <FieldBlock label={t.chatAutomationIfValue}>
+                  <input
+                    className="kv-input"
+                    value={node.data.if?.value ?? ''}
+                    onChange={(event) =>
+                      patchData({
+                        ...node.data,
+                        if: { op: node.data.if?.op ?? 'contains', value: event.target.value },
+                      })
+                    }
+                  />
+                </FieldBlock>
+              ) : null}
+            </>
+          ) : null}
+
+          {usesTemplates ? (
+            <p className="kv-automation-inspector-note">{t.chatAutomationVarsHint}</p>
+          ) : null}
+        </InspectorSection>
       ) : null}
 
-      {node.type === 'trigger.hotkey' ? (
-        <FieldBlock label={t.chatAutomationHotkey}>
-          <input
-            className="kv-input"
-            value={node.data.hotkey?.accelerator ?? ''}
-            placeholder="Control+Shift+A"
-            onChange={(event) =>
-              patchData({ ...node.data, hotkey: { accelerator: event.target.value } })
-            }
+      <InspectorSection title={t.chatAutomationSectionRun}>
+        <div className="kv-automation-inspector-toggle">
+          <span>{node.data.disabled ? t.chatAutomationNodeSkipped : t.chatAutomationNodeActive}</span>
+          <Toggle
+            checked={!node.data.disabled}
+            onChange={(enabled) => patchData({ ...node.data, disabled: !enabled })}
+            ariaLabel={t.chatAutomationNodeActive}
           />
-        </FieldBlock>
-      ) : null}
-
-      {node.type === 'action.agent' ? (
-        <FieldBlock label={t.chatAutomationNodePrompt}>
-          <textarea
-            className="kv-textarea"
-            rows={8}
-            value={node.data.agent?.prompt ?? ''}
-            placeholder={t.chatAutomationNodePromptPlaceholder}
-            onChange={(event) =>
-              patchData({
-                ...node.data,
-                agent: { prompt: event.target.value, skillId: node.data.agent?.skillId ?? null },
-              })
-            }
-          />
-        </FieldBlock>
-      ) : null}
-
-      {node.type === 'action.notify' ? (
-        <FieldBlock label={t.chatAutomationNotifyBody}>
-          <textarea
-            className="kv-textarea"
-            rows={4}
-            value={node.data.notify?.body ?? ''}
-            placeholder={t.chatAutomationNotifyPlaceholder}
-            onChange={(event) => patchData({ ...node.data, notify: { body: event.target.value } })}
-          />
-        </FieldBlock>
-      ) : null}
-
-      {node.type.startsWith('trigger.') && node.type !== 'trigger.manual' ? (
-        <p className="kv-automation-inspector-note">{t.chatAutomationEnableHint}</p>
-      ) : null}
+        </div>
+        {onExecuteStep ? (
+          <Button size="sm" onClick={onExecuteStep} disabled={running}>
+            <Play size={14} />
+            {t.chatAutomationExecuteStep}
+          </Button>
+        ) : null}
+        {lastOutput ? (
+          <div className="kv-automation-output">
+            <div className="kv-automation-inspector-kicker">{t.chatAutomationLastOutput}</div>
+            <pre>{lastOutput}</pre>
+          </div>
+        ) : null}
+      </InspectorSection>
 
       {node.type === 'trigger.schedule' || node.type === 'trigger.hotkey' ? (
-        <p className="kv-automation-inspector-note">{t.chatAutomationTrayOnly}</p>
+        <p className="kv-automation-inspector-foot">
+          {t.chatAutomationEnableHint}
+          {' '}
+          {t.chatAutomationTrayOnly}
+        </p>
       ) : null}
     </aside>
   )

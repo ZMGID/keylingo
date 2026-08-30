@@ -1,0 +1,76 @@
+//! Unattended system notification. Failures are logged; the run still continues
+//! with the interpolated body as node output.
+
+use std::process::Command;
+
+pub(crate) fn show(title: &str, body: &str) {
+    let title = truncate(title, 80);
+    let body = truncate(body, 240);
+    #[cfg(target_os = "macos")]
+    macos_notify(&title, &body);
+    #[cfg(target_os = "windows")]
+    windows_notify(&title, &body);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        eprintln!("automation notify: {title}: {body}");
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if out.chars().count() >= max {
+            out.push('…');
+            break;
+        }
+        if ch == '\0' {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn macos_notify(title: &str, body: &str) {
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_escape(body),
+        applescript_escape(title)
+    );
+    let _ = Command::new("osascript").arg("-e").arg(script).spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_notify(title: &str, body: &str) {
+    use crate::proc::NoConsoleWindow;
+    let xml = format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        xml_escape(title),
+        xml_escape(body)
+    );
+    let script = format!(
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
+         $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
+         $xml.LoadXml(@'\n{xml}\n'@); \
+         $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Kivio Desktop').Show($toast)"
+    );
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .no_console_window()
+        .spawn();
+}
+
+#[cfg(target_os = "windows")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}

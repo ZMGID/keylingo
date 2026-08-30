@@ -18,7 +18,7 @@ import type {
   ChatRunEventEnvelope,
   ChatSegmentPayload as GeneratedChatSegmentPayload,
 } from '../generated/chatProtocol'
-import type { Automation, AutomationMeta } from '../chat/automation/types'
+import type { Automation, AutomationMeta, AutomationRunEvent, AutomationRunStarted, AutomationRunSummary } from '../chat/automation/types'
 
 // ========== 类型定义 ==========
 
@@ -1992,6 +1992,12 @@ export const api = {
   automationDelete: (id: string) => invoke<void>('automation_delete', { id }),
   automationSetEnabled: (id: string, enabled: boolean) =>
     invoke<Automation>('automation_set_enabled', { id, enabled }),
+  automationRun: (id: string, untilNodeId?: string) =>
+    invoke<AutomationRunStarted>('automation_run', { id, untilNodeId: untilNodeId ?? null }),
+  automationCancel: (id: string) => invoke<void>('automation_cancel', { id }),
+  automationRunsList: (id: string) => invoke<AutomationRunSummary[]>('automation_runs_list', { id }),
+  onAutomationRun: (listener: (payload: AutomationRunEvent) => void) =>
+    on<AutomationRunEvent>('automation-run', listener),
 
   // 窗口控制
   /** 给当前（chat）窗口上 Mica，返回材质是否真的生效。Win10 没有 Mica 时为 false —— 这条

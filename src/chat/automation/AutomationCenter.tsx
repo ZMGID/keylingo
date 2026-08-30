@@ -131,6 +131,18 @@ export function AutomationCenter() {
           automation={editing}
           onChange={persist}
           onBack={backToList}
+          onFlushSave={async () => {
+            if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+            const current = editingRef.current
+            if (current && isTauriRuntime()) {
+              const saved = await automationApi.save(current)
+              setEditing((existing) => (
+                existing && existing.id === saved.id
+                  ? { ...existing, updatedAt: saved.updatedAt }
+                  : existing
+              ))
+            }
+          }}
         />
       </div>
     )

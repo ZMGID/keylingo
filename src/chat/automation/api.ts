@@ -1,5 +1,10 @@
 import { api } from '../../api/tauri'
-import type { Automation, AutomationMeta } from './types'
+import type {
+  Automation,
+  AutomationMeta,
+  AutomationRunStarted,
+  AutomationRunSummary,
+} from './types'
 
 export const automationApi = {
   list: () => api.automationList(),
@@ -7,6 +12,9 @@ export const automationApi = {
   save: (automation: Automation) => api.automationSave(automation),
   remove: (id: string) => api.automationDelete(id),
   setEnabled: (id: string, enabled: boolean) => api.automationSetEnabled(id, enabled),
+  run: (id: string, untilNodeId?: string) => api.automationRun(id, untilNodeId),
+  cancel: (id: string) => api.automationCancel(id),
+  listRuns: (id: string) => api.automationRunsList(id),
 }
 
-export type { Automation, AutomationMeta }
+export type { Automation, AutomationMeta, AutomationRunStarted, AutomationRunSummary }

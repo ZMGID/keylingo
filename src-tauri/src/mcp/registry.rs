@@ -1217,6 +1217,12 @@ async fn resolve_native_workspace(
     let Some(native_ctx) = native_ctx else {
         return Ok(NativeToolWorkspace::standalone());
     };
+    if let Some(workspace) = crate::automation::workspace_for_conversation(
+        working_directory,
+        &native_ctx.conversation_id,
+    ) {
+        return workspace;
+    }
     let conversation = crate::chat::storage::load_conversation(app, &native_ctx.conversation_id)
         .map_err(|err| {
             format!(

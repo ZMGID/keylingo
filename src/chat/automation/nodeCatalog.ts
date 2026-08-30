@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { Bell, Bot, Clock, Keyboard, MousePointerClick } from 'lucide-react'
+import { Bell, Bot, Clock, GitBranch, Globe, Keyboard, MousePointerClick } from 'lucide-react'
 import type { I18n } from '../../settings/i18n'
 import type { AutomationNodeType, FlowNodeData } from './types'
 
@@ -58,6 +58,28 @@ export const ACTION_CATALOG: NodeCatalogEntry[] = [
     }),
   },
   {
+    type: 'action.http',
+    kind: 'action',
+    icon: Globe,
+    label: (t) => t.chatAutomationActionHttp,
+    hint: (t) => t.chatAutomationActionHttpHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionHttp,
+      http: { method: 'GET', url: '', headers: '', body: '' },
+    }),
+  },
+  {
+    type: 'logic.if',
+    kind: 'action',
+    icon: GitBranch,
+    label: (t) => t.chatAutomationActionIf,
+    hint: (t) => t.chatAutomationActionIfHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionIf,
+      if: { op: 'contains', value: '' },
+    }),
+  },
+  {
     type: 'action.notify',
     kind: 'action',
     icon: Bell,
@@ -65,7 +87,7 @@ export const ACTION_CATALOG: NodeCatalogEntry[] = [
     hint: (t) => t.chatAutomationActionNotifyHint,
     defaultData: (t) => ({
       label: t.chatAutomationActionNotify,
-      notify: { body: '' },
+      notify: { body: '{{output}}' },
     }),
   },
 ]

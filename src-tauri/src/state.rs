@@ -291,6 +291,10 @@ pub struct AppState {
     /// 请求（脱敏 headers + body）+ 响应摘要。默认关闭（`chat_tools.request_debug_enabled`），
     /// 关闭时 adapter 短路、不构造记录。仅内存、不落盘，进程退出即清。
     pub request_debug: Mutex<VecDeque<crate::chat::request_debug::RequestDebugRecord>>,
+    /// 正在执行的自动化：automation_id → run_id。同一条自动化同时只跑一轮。
+    pub automation_active_runs: Mutex<HashMap<String, String>>,
+    /// 用户取消的 automation run_id 集合。
+    pub automation_cancelled_runs: Mutex<HashSet<String>>,
 }
 
 /// 一条外部 CLI 后台任务（claude 的 `system/task_started` / `task_notification`）。
@@ -438,6 +442,8 @@ impl AppState {
             background_commands: Arc::new(Mutex::new(HashMap::new())),
             external_background_tasks: Mutex::new(HashMap::new()),
             request_debug: Mutex::new(VecDeque::new()),
+            automation_active_runs: Mutex::new(HashMap::new()),
+            automation_cancelled_runs: Mutex::new(HashSet::new()),
         }
     }
 

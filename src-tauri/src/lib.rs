@@ -394,6 +394,7 @@ pub fn run() {
                     display_hotkey_errors(&err)
                 );
             }
+            crate::automation::spawn_scheduler(app.handle().clone());
             if let Err(err) = setup_tray(&app.handle()) {
                 eprintln!("Failed to setup tray: {err}");
             }
@@ -720,6 +721,10 @@ pub fn run() {
             automation::commands::automation_save,
             automation::commands::automation_delete,
             automation::commands::automation_set_enabled,
+            automation::commands::automation_run,
+            automation::commands::automation_cancel,
+            automation::commands::automation_runs_list,
+            automation::commands::automation_run_get,
             skills::chat_skills_list,
             skills::chat_skills_read,
             skills::chat_skills_import,

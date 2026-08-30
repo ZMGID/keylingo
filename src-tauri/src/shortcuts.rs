@@ -480,6 +480,7 @@ enum HotkeyScope {
     ScreenshotReplace,
     ScreenshotAnnotate,
     Lens,
+    Automation,
 }
 
 /// 单条热键注册错误。会被收集成 `Vec<HotkeyError>` 并 JSON 序列化作为 `register_hotkeys`
@@ -814,6 +815,40 @@ pub(crate) fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
                     err.to_string(),
                 ));
             }
+        }
+    }
+
+    for (hotkey, automation_id) in crate::automation::enabled_bindings(app) {
+        let hotkey_key = hotkey.to_lowercase();
+        if !registered.insert(hotkey_key) {
+            errors.push(HotkeyError {
+                kind: HotkeyErrorKind::Duplicate,
+                scope: HotkeyScope::Automation,
+                hotkey: hotkey.clone(),
+                raw: None,
+            });
+            continue;
+        }
+        if let Err(err) =
+            shortcut_manager.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    let app = app.clone();
+                    let id = automation_id.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(err) =
+                            crate::automation::enqueue(app, id, crate::automation::RunOrigin::Hotkey, None)
+                        {
+                            eprintln!("automation hotkey: {err}");
+                        }
+                    });
+                }
+            })
+        {
+            errors.push(classify_hotkey_error(
+                HotkeyScope::Automation,
+                hotkey,
+                err.to_string(),
+            ));
         }
     }
 

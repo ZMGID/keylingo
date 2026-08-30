@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::types::{is_allowed_node_type, Automation, AutomationMeta, SCHEMA_VERSION};
 
-fn automations_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn automations_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
