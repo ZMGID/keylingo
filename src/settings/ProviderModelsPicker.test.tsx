@@ -66,6 +66,27 @@ describe('ProviderModelsPicker', () => {
     expect(refresh.textContent).not.toMatch(/获取模型列表/)
   })
 
+  it('does not list enabled models the provider no longer offers', () => {
+    render(
+      <ProviderModelsPicker
+        provider={makeProvider({
+          availableModels: ['deepseek-v4-pro'],
+          enabledModels: ['retired-model', 'deepseek-v4-pro'],
+        })}
+        lang="zh"
+        labels={labels}
+        fetching={false}
+        onClose={() => {}}
+        onFetch={() => {}}
+        onAdd={() => {}}
+        onAddAll={() => {}}
+        onRemove={() => {}}
+      />,
+    )
+    expect(screen.getByText('deepseek-v4-pro')).toBeTruthy()
+    expect(screen.queryByText('retired-model')).toBeNull()
+  })
+
   it('adds a typed model from the compact manual row', async () => {
     const user = userEvent.setup()
     const onAdd = vi.fn()
@@ -86,5 +107,6 @@ describe('ProviderModelsPicker', () => {
     await user.type(screen.getByPlaceholderText('手动添加'), 'my-custom-model')
     await user.click(screen.getByRole('button', { name: '添加' }))
     expect(onAdd).toHaveBeenCalledWith('my-custom-model')
+    expect(screen.getByText('my-custom-model')).toBeTruthy()
   })
 })
