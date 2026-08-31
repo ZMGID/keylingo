@@ -26,6 +26,10 @@ use super::workspace;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_BODY_MAX: usize = 50 * 1024;
+/// 全局并发帽：不同 id 的 schedule/hotkey/manual 同时触发时，每条都是完整的
+/// agent loop / CLI 子进程，无帽会线性叠满 CPU/内存/供应商配额（对比 sub-agent
+/// 有 12 的信号量）。超限直接拒绝并落错误——排队会让定时任务悄悄堆积。
+const MAX_CONCURRENT_AUTOMATION_RUNS: usize = 4;
 
 pub fn enqueue(
     app: AppHandle,
@@ -50,6 +54,11 @@ pub fn enqueue(
             .unwrap_or_else(|e| e.into_inner());
         if active.contains_key(&id) {
             return Err("automation is already running".to_string());
+        }
+        if active.len() >= MAX_CONCURRENT_AUTOMATION_RUNS {
+            return Err(format!(
+                "too many automations running concurrently (max {MAX_CONCURRENT_AUTOMATION_RUNS})"
+            ));
         }
         active.insert(id.clone(), run_id.clone());
     }
@@ -80,6 +89,40 @@ pub fn enqueue(
         let _ = status;
     });
     Ok(AutomationRunStarted { run_id })
+}
+
+/// 退出前兜底：把所有运行中的自动化标记取消。返回条数。
+/// 真正的收尾靠 [`wait_all_finished`]——等待期间运行时还活着，
+/// 命令节点的 `select!` 被取消分支唤醒后 drop 掉 Child（kill_on_drop）才来得及执行。
+pub fn cancel_all(app: &AppHandle) -> usize {
+    let ids: Vec<String> = {
+        let state = app.state::<AppState>();
+        let active = state
+            .automation_active_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        active.keys().cloned().collect()
+    };
+    for id in &ids {
+        let _ = cancel(app, id);
+    }
+    ids.len()
+}
+
+/// 等到 active 表清空（配合外层 timeout 使用）。
+pub async fn wait_all_finished(app: &AppHandle) {
+    loop {
+        let empty = app
+            .state::<AppState>()
+            .automation_active_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if empty {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub fn cancel(app: &AppHandle, id: &str) -> Result<(), String> {

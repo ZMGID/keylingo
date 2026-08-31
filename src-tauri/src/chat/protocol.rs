@@ -17,6 +17,25 @@ pub const CHAT_PROTOCOL_EVENT: &str = "chat-protocol";
 pub const CHAT_PROTOCOL_CHANNEL_RESET_EVENT: &str = "chat-protocol-channel-reset";
 const MAX_REPLAY_EVENTS: usize = 512;
 const MAX_REPLAY_BYTES: usize = 2 * 1024 * 1024;
+/// 运行中快照的正文/推理字段字节上限。replay 有 2MB 裁剪，但 fold_snapshot 持续
+/// 追加的快照本体没有——超长流式（多工具轮 + 长 reasoning）会让 popout 打开或
+/// sync 补缺口时一次性 clone + 序列化数 MB JSON 跨 IPC。留尾裁头：live 视图只要
+/// 最近内容；终态后前端整段 reload 会话，落库数据不受影响。
+const SNAPSHOT_TEXT_MAX_BYTES: usize = 512 * 1024;
+/// 单个段的文本上限（段数本身受轮次约束）。
+const SNAPSHOT_SEGMENT_MAX_BYTES: usize = 256 * 1024;
+
+/// 超限时从头部裁掉多余字节，保住最新的尾部（对齐到字符边界）。
+fn cap_text_tail(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    let mut cut = text.len() - max_bytes;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text.replace_range(..cut, "");
+}
 const COMPLETED_RUN_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_COMPLETED_RUNS: usize = 32;
 /// Text/Reasoning delta 的合帧窗口。多对话并发时「每 token 一条 IPC 事件」是压垮
@@ -47,10 +66,7 @@ fn notify_protocol_debug_sink(event: &ChatProtocolEvent) {
     let Some(slot) = PROTOCOL_DEBUG_SINK.get() else {
         return;
     };
-    let sink = slot
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let sink = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(sink) = sink {
         sink(event);
     }
@@ -755,7 +771,12 @@ impl ChatProtocolFilter {
     /// `exclusive_live`：此刻已有窗口以 `Conversation(id)` 订了这条对话。
     /// 不能用「弹出窗是否存在」代替——窗口已建但通道订成 `All`、或 Channel 已死时，
     /// 再按窗口集合跳过 All 会把 token 投进黑洞，弹出窗表现为生成直接断。
-    pub fn accepts(&self, conversation_id: &str, high_frequency: bool, exclusive_live: bool) -> bool {
+    pub fn accepts(
+        &self,
+        conversation_id: &str,
+        high_frequency: bool,
+        exclusive_live: bool,
+    ) -> bool {
         match self {
             Self::Conversation(id) => id == conversation_id,
             Self::All => !(high_frequency && exclusive_live),
@@ -1440,10 +1461,12 @@ fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
     match event {
         ChatRunEvent::TextDelta { delta, segment } => {
             snapshot.content.push_str(delta);
+            cap_text_tail(&mut snapshot.content, SNAPSHOT_TEXT_MAX_BYTES);
             upsert_segment(&mut snapshot.segments, segment, delta);
         }
         ChatRunEvent::ReasoningDelta { delta, segment } => {
             snapshot.reasoning.push_str(delta);
+            cap_text_tail(&mut snapshot.reasoning, SNAPSHOT_TEXT_MAX_BYTES);
             upsert_segment(&mut snapshot.segments, segment, delta);
         }
         ChatRunEvent::ToolUpdated { tool } => {
@@ -1642,6 +1665,7 @@ fn upsert_segment(
         // delta 都整段拷贝，多对话并发时在协议锁内滚成显著 CPU。
         let mut accumulated = existing.text.take().unwrap_or_default();
         accumulated.push_str(delta);
+        cap_text_tail(&mut accumulated, SNAPSHOT_SEGMENT_MAX_BYTES);
         *existing = segment.clone();
         existing.text = Some(accumulated);
     } else {
@@ -1814,7 +1838,8 @@ fn replay_bytes_estimate(envelope: &ChatRunEventEnvelope) -> usize {
         + envelope.run_id.len()
         + envelope.message_id.len();
     match &envelope.event {
-        ChatRunEvent::TextDelta { delta, segment } | ChatRunEvent::ReasoningDelta { delta, segment } => {
+        ChatRunEvent::TextDelta { delta, segment }
+        | ChatRunEvent::ReasoningDelta { delta, segment } => {
             let segment_bytes = segment.as_ref().map_or(0, |segment| {
                 SEGMENT_OVERHEAD
                     + segment.id.len()
@@ -2425,6 +2450,28 @@ mod tests {
     }
 
     #[test]
+    fn running_snapshot_text_is_capped_keeping_tail() {
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        let chunk = "中x".repeat(SNAPSHOT_TEXT_MAX_BYTES / 8);
+        for _ in 0..3 {
+            hub.push(
+                "run",
+                ChatRunEvent::TextDelta {
+                    delta: chunk.clone(),
+                    segment: None,
+                },
+            )
+            .unwrap();
+        }
+        let snapshot = &hub.runs["run"].snapshot;
+        assert!(snapshot.content.len() <= SNAPSHOT_TEXT_MAX_BYTES);
+        assert!(snapshot.content.ends_with('x'));
+        // 裁切必须落在字符边界上，不能产出半个 UTF-8 字符。
+        assert!(snapshot.content.is_char_boundary(0));
+    }
+
+    #[test]
     fn first_mount_returns_aggregate_snapshot() {
         let mut hub = ChatProtocolHub::default();
         hub.register("conv", "run", "message", 0).unwrap();
@@ -2729,7 +2776,10 @@ mod tests {
         let mut hub = ChatProtocolHub::default();
         hub.register("conv", "run", "message", 0).unwrap();
         let (envelopes, schedule) = hub
-            .buffer_delta("run", pending_text(&"x".repeat(DELTA_COALESCE_MAX_BYTES), None))
+            .buffer_delta(
+                "run",
+                pending_text(&"x".repeat(DELTA_COALESCE_MAX_BYTES), None),
+            )
             .unwrap();
         assert_eq!(envelopes.len(), 1);
         assert!(!schedule);
@@ -2739,7 +2789,9 @@ mod tests {
     #[test]
     fn buffer_delta_refuses_unknown_and_terminal_runs() {
         let mut hub = ChatProtocolHub::default();
-        assert!(hub.buffer_delta("missing", pending_text("x", None)).is_err());
+        assert!(hub
+            .buffer_delta("missing", pending_text("x", None))
+            .is_err());
         hub.register("conv", "run", "message", 0).unwrap();
         hub.push(
             "run",

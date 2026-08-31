@@ -70,9 +70,10 @@ fn write_atomic(path: &PathBuf, automation: &Automation) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn list(app: &AppHandle) -> Result<Vec<AutomationMeta>, String> {
+/// 单次目录遍历读全量图。调度器用它避免「list 拿 meta、再逐条 get」的双倍读盘。
+pub(crate) fn list_full(app: &AppHandle) -> Result<Vec<Automation>, String> {
     let dir = automations_dir(app)?;
-    let mut metas = Vec::new();
+    let mut automations = Vec::new();
     let entries = fs::read_dir(&dir).map_err(|err| format!("list automations failed: {err}"))?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -80,12 +81,20 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<AutomationMeta>, String> {
             continue;
         }
         match read_one(&path) {
-            Ok(automation) => metas.push(automation.meta()),
+            Ok(automation) => automations.push(automation),
             Err(err) => {
                 eprintln!("skip automation {}: {err}", path.display());
             }
         }
     }
+    Ok(automations)
+}
+
+pub(crate) fn list(app: &AppHandle) -> Result<Vec<AutomationMeta>, String> {
+    let mut metas: Vec<AutomationMeta> = list_full(app)?
+        .into_iter()
+        .map(|automation| automation.meta())
+        .collect();
     metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(metas)
 }
@@ -107,6 +116,7 @@ pub(crate) fn save(app: &AppHandle, mut automation: Automation) -> Result<Automa
     validate_graph(&automation)?;
     write_atomic(&file_path(app, &automation.id)?, &automation)?;
     events::changed(app, "saved", &automation.id, Some(automation.updated_at.clone()));
+    super::schedule::poke();
     Ok(automation)
 }
 
@@ -118,6 +128,7 @@ pub(crate) fn delete(app: &AppHandle, id: &str) -> Result<(), String> {
     let _ = super::history::delete_all(app, id);
     super::schedule::forget(app, id);
     events::changed(app, "deleted", id, None);
+    super::schedule::poke();
     Ok(())
 }
 

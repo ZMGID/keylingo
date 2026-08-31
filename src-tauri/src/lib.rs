@@ -788,6 +788,23 @@ pub fn run() {
                 } else {
                     // 真正退出：同步排干 MCP 连接池，杀掉所有持久子进程，避免孤儿进程。
                     let state: State<AppState> = app_handle.state();
+                    // 自动化先于 MCP：运行中的图可能正跑 agent loop（依赖 MCP/供应商）或
+                    // 命令节点（Child 靠 kill_on_drop 收尸）。先标记取消、限时等收尾，
+                    // 此时运行时还活着，select! 的取消分支才来得及 drop 掉 Child。
+                    let cancelled = crate::automation::cancel_all_runs(app_handle);
+                    if cancelled > 0 {
+                        // 同上：timeout 必须在 async 块里构造。
+                        let finished = tauri::async_runtime::block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(3),
+                                crate::automation::wait_runs_finished(app_handle),
+                            )
+                            .await
+                        });
+                        if finished.is_err() {
+                            eprintln!("Automation runs did not finish in time on exit.");
+                        }
+                    }
                     // 带超时：一个卡在握手里的 server 会占着会话锁不放，没有这层
                     // 上限的话退出钩子会永久阻塞在主线程上 —— 表现是「点关闭没反应、
                     // 进程不退」，连带其余所有 MCP 子进程全留在系统里。

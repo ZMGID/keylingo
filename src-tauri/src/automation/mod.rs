@@ -30,6 +30,6 @@ pub use types::{Automation, AutomationMeta, SCHEMA_VERSION};
 pub use workspace::workspace_for_conversation;
 
 pub(crate) use hotkeys::enabled_bindings;
-pub(crate) use runner::enqueue;
+pub(crate) use runner::{cancel_all as cancel_all_runs, enqueue, wait_all_finished as wait_runs_finished};
 pub(crate) use schedule::spawn as spawn_scheduler;
 pub(crate) use types::RunOrigin;

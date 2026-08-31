@@ -2591,10 +2591,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   useEffect(() => {
     const conversationId = currentConversation?.id
     if (!conversationId) return
+    // 已弹出的会话:主窗只渲染占位卡、不渲染消息,run 边沿事件足够;
+    // sync 会把该会话的运行快照(可能数百 KB)白拉到主窗协议状态里。
+    if (popoutConversationIdsRef.current.has(conversationId)) return
     void api.chatSyncState(conversationId).catch((error) => {
       console.error('Failed to synchronize chat protocol state:', error)
     })
-  }, [currentConversation?.id])
+  }, [currentConversation?.id, popoutConversationIds])
 
   useEffect(() => {
     currentConversationIdRef.current = currentConversation?.id ?? null
