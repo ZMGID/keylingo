@@ -254,6 +254,7 @@ describe('ToolCallBlock', () => {
     expect(screen.getByText('action.agent')).toBeInTheDocument()
     expect(screen.getByText('打开工作流')).toBeInTheDocument()
     await user.click(screen.getByText('打开工作流'))
+    expect(window.location.hash).toBe('#chat/automations/auto-1')
   })
 
   it('renders a knowledge_search record as a KNOWLEDGE consult card with query and hits', async () => {

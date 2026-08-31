@@ -123,6 +123,13 @@ fn tick_once(app: &AppHandle) {
     }
 }
 
+pub(crate) fn forget(app: &AppHandle, id: &str) {
+    let mut state = load_state(app);
+    if state.last_fired.remove(id).is_some() {
+        save_state(app, &state);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Due {
     Wait,

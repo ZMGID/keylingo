@@ -115,6 +115,8 @@ pub(crate) fn delete(app: &AppHandle, id: &str) -> Result<(), String> {
     if path.exists() {
         fs::remove_file(&path).map_err(|err| format!("delete automation failed: {err}"))?;
     }
+    let _ = super::history::delete_all(app, id);
+    super::schedule::forget(app, id);
     events::changed(app, "deleted", id, None);
     Ok(())
 }

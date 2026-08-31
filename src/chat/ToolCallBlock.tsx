@@ -758,23 +758,25 @@ function AutomationRunCard({ toolCall }: ToolCallBlockProps) {
   const args = useMemo(() => parsedArguments(toolCall), [toolCall])
   const automationId = view?.automationId || stringValue(args?.id)
   const name = view?.name || stringValue(args?.name)
-  const [liveRunId, setLiveRunId] = useState(view?.runId ?? '')
   const [liveNodes, setLiveNodes] = useState<AutomationRunNodeView[]>(view?.nodes ?? [])
   const [liveStep, setLiveStep] = useState('')
 
   useEffect(() => {
-    if (view?.runId) setLiveRunId(view.runId)
     if (view?.nodes?.length) setLiveNodes(view.nodes)
   }, [view])
 
   useEffect(() => {
     if (!automationId) return
+    const pinnedRunId = view?.runId ?? ''
+    const followLive = status === 'running' || Boolean(pinnedRunId)
+    if (!followLive) return
     let cancelled = false
+    let lockedId = pinnedRunId
     let unlisten: (() => void) | undefined
     void api.onAutomationRun((event) => {
       if (event.automationId !== automationId) return
-      if (liveRunId && event.runId !== liveRunId) return
-      if (!liveRunId && event.runId) setLiveRunId(event.runId)
+      if (lockedId && event.runId !== lockedId) return
+      if (!lockedId && event.runId) lockedId = event.runId
       if (event.kind === 'node_started' && event.nodeId) {
         setLiveStep(event.nodeId)
         setLiveNodes((current) => upsertLiveNode(current, event.nodeId!, 'running'))
@@ -799,7 +801,7 @@ function AutomationRunCard({ toolCall }: ToolCallBlockProps) {
       cancelled = true
       unlisten?.()
     }
-  }, [automationId, liveRunId])
+  }, [automationId, view?.runId, status])
 
   const nodes = liveNodes.length ? liveNodes : (view?.nodes ?? [])
   const current = nodes.find((node) => node.status === 'running')

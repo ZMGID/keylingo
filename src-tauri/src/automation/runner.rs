@@ -42,21 +42,17 @@ pub fn enqueue(
         return Err("automation has no nodes".to_string());
     }
     let state = app.state::<AppState>();
+    let run_id = Uuid::new_v4().to_string();
     {
-        let active = state
+        let mut active = state
             .automation_active_runs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if active.contains_key(&id) {
             return Err("automation is already running".to_string());
         }
+        active.insert(id.clone(), run_id.clone());
     }
-    let run_id = Uuid::new_v4().to_string();
-    state
-        .automation_active_runs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id.clone(), run_id.clone());
 
     let app_run = app.clone();
     let run_id_spawn = run_id.clone();
@@ -102,15 +98,15 @@ pub fn cancel(app: &AppHandle, id: &str) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(run_id);
-        state.cancel_chat_generation(&workspace::conversation_id(id));
-        state.cancel_chat_generation(&workspace::external_conversation_id(id, ""));
-        if let Ok(automation) = storage::get(app, id) {
-            for node in automation.nodes {
-                if node.node_type == "action.agent" {
-                    state.cancel_chat_generation(&workspace::external_conversation_id(
-                        id,
-                        &node.id,
-                    ));
+    state.cancel_chat_generation(&workspace::conversation_id(id));
+    state.cancel_chat_generation(&workspace::external_conversation_id(id, ""));
+    if let Ok(automation) = storage::get(app, id) {
+        for node in automation.nodes {
+            if node.node_type == "action.agent" {
+                state.cancel_chat_generation(&workspace::external_conversation_id(
+                    id,
+                    &node.id,
+                ));
             }
         }
     }
@@ -219,6 +215,11 @@ async fn execute_graph(
             continue;
         }
         for next in next_node_ids(&automation, &node.id, handle_hint.as_deref()) {
+            if let Some(until) = until_node_id.as_deref() {
+                if !reaches(&automation, &next, until) {
+                    continue;
+                }
+            }
             queue.push_back((next, incoming.clone()));
         }
     }
@@ -730,6 +731,21 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+pub(crate) fn reaches(automation: &Automation, from: &str, until: &str) -> bool {
+    let mut stack = vec![from.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if id == until {
+            return true;
+        }
+        stack.extend(next_node_ids(automation, &id, None));
+    }
+    false
+}
+
 pub(crate) fn next_node_ids(automation: &Automation, from: &str, handle: Option<&str>) -> Vec<String> {
     automation
         .edges
@@ -903,13 +919,21 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        let clipped: String = text.chars().take(max).collect();
-        format!("{clipped}…")
+fn clip(text: &str, max_bytes: usize) -> String {
+    clip_bytes(text, max_bytes)
+}
+
+pub(crate) fn clip_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
     }
+    let ellipsis = "…";
+    let budget = max_bytes.saturating_sub(ellipsis.len());
+    let mut end = budget;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ellipsis}", &text[..end])
 }
 
 #[cfg(test)]
@@ -991,6 +1015,10 @@ mod tests {
             next_node_ids(&automation, "t", None),
             vec!["a".to_string(), "b".to_string()]
         );
+        assert!(reaches(&automation, "t", "a"));
+        assert!(reaches(&automation, "a", "a"));
+        assert!(!reaches(&automation, "a", "b"));
+        assert!(!reaches(&automation, "b", "a"));
     }
 
     #[test]
@@ -1193,5 +1221,13 @@ mod tests {
         assert_eq!(trigger.text, "manual");
         assert_eq!(trigger.json["origin"], "manual");
         assert!(trigger.json.get("input").is_none());
+    }
+
+    #[test]
+    fn clip_bytes_does_not_exceed_budget_on_cjk() {
+        let text = "你好世界";
+        let clipped = clip_bytes(text, 7);
+        assert!(clipped.len() <= 7);
+        assert!(clipped.ends_with('…'));
     }
 }

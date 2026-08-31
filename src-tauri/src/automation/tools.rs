@@ -419,12 +419,16 @@ fn stringify(value: &Value) -> String {
 }
 
 fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        let clipped: String = text.chars().take(max).collect();
-        format!("{clipped}…")
+    if text.len() <= max {
+        return text.to_string();
     }
+    let ellipsis = "…";
+    let budget = max.saturating_sub(ellipsis.len());
+    let mut end = budget;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ellipsis}", &text[..end])
 }
 
 #[cfg(test)]

@@ -9,6 +9,12 @@ import { AutomationList } from './AutomationList'
 import { createBlankAutomation } from './graph'
 import type { Automation, AutomationMeta } from './types'
 
+function clearTimeoutRef(ref: { current: ReturnType<typeof setTimeout> | null }) {
+  if (ref.current == null) return
+  window.clearTimeout(ref.current)
+  ref.current = null
+}
+
 export function AutomationCenter() {
   const t = useT()
   const [items, setItems] = useState<AutomationMeta[]>([])
@@ -53,7 +59,7 @@ export function AutomationCenter() {
       const current = editingRef.current
       if (!current || event.id !== current.id) return
       if (event.kind === 'deleted') {
-        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+        clearTimeoutRef(saveTimerRef)
         setRemoteHint('')
         setEditing(null)
         setHash('#chat/automations')
@@ -112,7 +118,7 @@ export function AutomationCenter() {
     const syncFromHash = () => {
       const id = getRouteAutomationId()
       if (!id) {
-        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+        clearTimeoutRef(saveTimerRef)
         const current = editingRef.current
         if (current && isTauriRuntime()) {
           void automationApi.save(current).catch((err) => {
@@ -133,8 +139,9 @@ export function AutomationCenter() {
   const persist = useCallback((next: Automation) => {
     setEditing(next)
     if (!isTauriRuntime()) return
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    clearTimeoutRef(saveTimerRef)
     saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null
       selfSaveInFlightRef.current += 1
       void automationApi
         .save(next)
@@ -194,7 +201,7 @@ export function AutomationCenter() {
   }, [loadList, t])
 
   const backToList = useCallback(() => {
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    clearTimeoutRef(saveTimerRef)
     const current = editingRef.current
     const finish = () => {
       setRemoteHint('')
@@ -224,7 +231,7 @@ export function AutomationCenter() {
           onChange={persist}
           onBack={backToList}
           onFlushSave={async () => {
-            if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+            clearTimeoutRef(saveTimerRef)
             const current = editingRef.current
             if (current && isTauriRuntime()) {
               selfSaveInFlightRef.current += 1

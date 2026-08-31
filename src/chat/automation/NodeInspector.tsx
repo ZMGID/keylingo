@@ -168,7 +168,7 @@ export function NodeInspector({
                         ...node.data,
                         schedule: {
                           ...node.data.schedule!,
-                          intervalMinutes: Number(event.target.value) || 60,
+                          intervalMinutes: Math.min(1440, Math.max(5, Number(event.target.value) || 60)),
                         },
                       })
                     }

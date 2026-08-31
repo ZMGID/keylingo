@@ -3,9 +3,11 @@ use serde_json::Value;
 use super::types::NodeOutput;
 
 pub fn interpolate(template: &str, prev: &NodeOutput) -> String {
-    // Replace {{json.*}} on the template first so text from {{output}} is not
-    // scanned for more placeholders.
-    let mut out = template.to_string();
+    // Expand {{output}} to a sentinel first so JSON replacements that happen
+    // to contain "{{output}}" are not scanned as templates, then restore text
+    // last so prev.text is never scanned for {{json.*}}.
+    const SENTINEL: &str = "\u{0}OUTPUT\u{0}";
+    let mut out = template.replace("{{output}}", SENTINEL);
     let mut search_from = 0;
     while let Some(start) = out[search_from..].find("{{json.") {
         let abs = search_from + start;
@@ -23,7 +25,7 @@ pub fn interpolate(template: &str, prev: &NodeOutput) -> String {
         out.replace_range(abs..replace_end, &replacement);
         search_from = abs + replacement.len();
     }
-    out.replace("{{output}}", &prev.text)
+    out.replace(SENTINEL, &prev.text)
 }
 
 fn lookup_json(value: &Value, path: &str) -> Option<String> {
@@ -77,6 +79,15 @@ mod tests {
             interpolate("{{output}} / {{json.status}}", &prev),
             "see {{json.status}} / 200"
         );
+    }
+
+    #[test]
+    fn does_not_expand_output_placeholder_inside_json_values() {
+        let prev = NodeOutput::with_json(
+            "HELLO",
+            json!({ "note": "see {{output}}" }),
+        );
+        assert_eq!(interpolate("{{json.note}}", &prev), "see {{output}}");
     }
 
     #[test]

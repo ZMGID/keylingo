@@ -8,6 +8,7 @@ import {
   flowEdgeFromConnection,
   layoutFlow,
   pickAppendSource,
+  pruneDanglingBranchEdges,
   topologicalOrder,
 } from './graph'
 import { AUTOMATION_SCHEMA_VERSION, type Automation } from './types'
@@ -29,6 +30,14 @@ describe('automation graph', () => {
     expect(canConnect('a', 'n', nodes, edges)).toBe(true)
     expect(canConnect('n', 'a', nodes, [...edges, connectNodes('a', 'n')])).toBe(false)
     expect(canConnect('t', 'a', nodes, edges)).toBe(false)
+  })
+
+  it('拒绝把下游接回上游形成环', () => {
+    const a = { ...node('a', 'action.notify', 200), id: 'a' }
+    const b = { ...node('b', 'action.notify', 400), id: 'b' }
+    const nodes = [a, b]
+    expect(canConnect('a', 'b', nodes, [])).toBe(true)
+    expect(canConnect('b', 'a', nodes, [connectNodes('a', 'b')])).toBe(false)
   })
 
   it('Switch 每个出口只能连一条边', () => {
@@ -161,5 +170,24 @@ describe('automation graph', () => {
     expect(remapped.targetHandle).toBe('runtime')
     expect(remapped.sourceHandle).toBe('slot')
     expect(canConnect('t', 'a', nodes, [remapped])).toBe(true)
+  })
+
+  it('删除 switch case 时清掉该口上的边', () => {
+    const sw = createFlowNode('logic.switch', {
+      label: 's',
+      switch: { cases: [{ id: '1', op: 'equals', value: 'a' }] },
+    }, { x: 0, y: 0 })
+    sw.id = 's'
+    const a = { ...node('a', 'action.notify'), id: 'a' }
+    const b = { ...node('b', 'action.notify'), id: 'b' }
+    const edges = [
+      connectNodes('s', 'a', '1'),
+      connectNodes('s', 'b', 'default'),
+    ]
+    const kept = pruneDanglingBranchEdges(
+      [{ ...sw, data: { ...sw.data, switch: { cases: [] } } }, a, b],
+      edges,
+    )
+    expect(kept.map((edge) => edge.sourceHandle)).toEqual(['default'])
   })
 })

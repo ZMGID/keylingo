@@ -97,6 +97,8 @@ pub fn validate(automation: &Automation) -> Vec<ValidationIssue> {
         ));
     }
 
+    lint_incoming_edges(&mut issues, automation, &node_by_id);
+
     for node in &automation.nodes {
         lint_node_data(&mut issues, automation, node);
     }
@@ -231,6 +233,42 @@ pub fn auto_layout(automation: &mut Automation) {
             y: leftover_lane as f64 * LAYOUT_DY,
         };
         leftover_lane += 1;
+    }
+}
+
+fn lint_incoming_edges(
+    issues: &mut Vec<ValidationIssue>,
+    automation: &Automation,
+    node_by_id: &HashMap<&str, &FlowNode>,
+) {
+    for node in &automation.nodes {
+        if node.node_type.starts_with("trigger.") || node.node_type.starts_with("agent.") {
+            continue;
+        }
+        let mut from_step = 0usize;
+        let mut from_trigger = 0usize;
+        for edge in &automation.edges {
+            if edge.target != node.id || is_slot_target_handle(edge.target_handle.as_deref()) {
+                continue;
+            }
+            let Some(src) = node_by_id.get(edge.source.as_str()) else {
+                continue;
+            };
+            if src.node_type.starts_with("trigger.") {
+                from_trigger += 1;
+            } else {
+                from_step += 1;
+            }
+        }
+        if from_step > 1 || (from_step == 1 && from_trigger > 0) {
+            issues.push(ValidationIssue::error(
+                Some(node.id.clone()),
+                format!(
+                    "node '{}' has more than one main-flow input; only a tree is allowed",
+                    node.id
+                ),
+            ));
+        }
     }
 }
 
@@ -676,6 +714,40 @@ mod tests {
         assert!(errors_of(&automation)
             .iter()
             .any(|m| m.contains("cycle")));
+    }
+
+    #[test]
+    fn two_step_inputs_is_an_error() {
+        let automation = graph(
+            vec![
+                node("t", "trigger.manual"),
+                node("a", "action.notify"),
+                node("b", "action.notify"),
+                node("c", "action.notify"),
+            ],
+            vec![
+                edge("t", "a", None),
+                edge("t", "b", None),
+                edge("a", "c", None),
+                edge("b", "c", None),
+            ],
+        );
+        assert!(errors_of(&automation)
+            .iter()
+            .any(|m| m.contains("more than one main-flow input")));
+    }
+
+    #[test]
+    fn two_triggers_may_join_at_one_step() {
+        let automation = graph(
+            vec![
+                node("m", "trigger.manual"),
+                node("s", "trigger.schedule"),
+                node("a", "action.notify"),
+            ],
+            vec![edge("m", "a", None), edge("s", "a", None)],
+        );
+        assert!(!has_errors(&validate(&automation)));
     }
 
     #[test]

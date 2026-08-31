@@ -37,6 +37,7 @@ import {
   nextNodePosition,
   nextTriggerPosition,
   pickAppendSource,
+  pruneDanglingBranchEdges,
 } from './graph'
 import { SLOT_CATALOG, type NodeCatalogEntry } from './nodeCatalog'
 import {
@@ -426,9 +427,11 @@ function EditorInner({
     const nextNodes = nodesRef.current.map((node) =>
       node.id === next.id ? { ...node, data: next.data, type: next.type } : node,
     )
+    const nextEdges = pruneDanglingBranchEdges(nextNodes, edgesRef.current)
     setNodes(nextNodes)
-    commit(nextNodes, edgesRef.current)
-  }, [commit, setNodes])
+    if (nextEdges.length !== edgesRef.current.length) setEdges(nextEdges)
+    commit(nextNodes, nextEdges)
+  }, [commit, setEdges, setNodes])
 
   const deleteNode = useCallback((nodeId: string) => {
     const drop = new Set<string>([nodeId])
@@ -469,9 +472,10 @@ function EditorInner({
     setRunError('')
     try {
       await onFlushSave()
-      await automationApi.run(automation.id, untilNodeId)
       setRunning(true)
+      await automationApi.run(automation.id, untilNodeId)
     } catch (err) {
+      setRunning(false)
       setRunError(err instanceof Error ? err.message : String(err))
     }
   }, [automation.id, onFlushSave])

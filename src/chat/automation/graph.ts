@@ -206,7 +206,45 @@ export function canConnect(
       return false
     }
   }
+  if (wouldCreateCycle(source, target, edges)) return false
   return true
+}
+
+/** True if adding source→target on the main flow would close a cycle. */
+export function wouldCreateCycle(source: string, target: string, edges: FlowEdge[]): boolean {
+  const outgoing = new Map<string, string[]>()
+  for (const edge of edges) {
+    if (isSlotEdge(edge)) continue
+    const list = outgoing.get(edge.source) ?? []
+    list.push(edge.target)
+    outgoing.set(edge.source, list)
+  }
+  const stack = [target]
+  const seen = new Set<string>()
+  while (stack.length > 0) {
+    const id = stack.pop()!
+    if (id === source) return true
+    if (seen.has(id)) continue
+    seen.add(id)
+    for (const next of outgoing.get(id) ?? []) stack.push(next)
+  }
+  return false
+}
+
+export function pruneDanglingBranchEdges<
+  N extends { id: string, type?: string, data?: FlowNodeData },
+  E extends { source: string, sourceHandle?: string | null, targetHandle?: string | null },
+>(nodes: N[], edges: E[]): E[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  return edges.filter((edge) => {
+    if (isSlotEdge(edge)) return true
+    const from = byId.get(edge.source)
+    if (!from) return true
+    const handles = branchHandles(from.type ?? '', from.data)
+    if (!handles) return true
+    const handle = edge.sourceHandle || handles[0]
+    return handles.includes(handle)
+  })
 }
 
 export function connectNodes(

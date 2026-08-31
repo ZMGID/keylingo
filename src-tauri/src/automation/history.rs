@@ -8,6 +8,15 @@ use super::types::{AutomationRun, AutomationRunSummary};
 
 const MAX_RUNS_PER_AUTOMATION: usize = 50;
 
+pub(crate) fn delete_all(app: &AppHandle, automation_id: &str) -> Result<(), String> {
+    validate_id(automation_id)?;
+    let dir = automations_dir(app)?.join("runs").join(automation_id);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|err| format!("delete run history failed: {err}"))?;
+    }
+    Ok(())
+}
+
 fn runs_dir(app: &AppHandle, automation_id: &str) -> Result<PathBuf, String> {
     validate_id(automation_id)?;
     let dir = automations_dir(app)?.join("runs").join(automation_id);

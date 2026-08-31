@@ -4,8 +4,8 @@
 use std::process::Command;
 
 pub(crate) fn show(title: &str, body: &str) {
-    let title = truncate(title, 80);
-    let body = truncate(body, 240);
+    let title = sanitize_toast_text(title, 80);
+    let body = sanitize_toast_text(body, 240);
     #[cfg(target_os = "macos")]
     macos_notify(&title, &body);
     #[cfg(target_os = "windows")]
@@ -16,15 +16,22 @@ pub(crate) fn show(title: &str, body: &str) {
     }
 }
 
+/// Collapse control breaks so Windows PowerShell here-strings / AppleScript
+/// literals cannot be closed by interpolated node output.
+fn sanitize_toast_text(s: &str, max: usize) -> String {
+    let collapsed: String = s
+        .chars()
+        .filter(|ch| *ch != '\0' && *ch != '\n' && *ch != '\r')
+        .collect();
+    truncate(&collapsed, max)
+}
+
 fn truncate(s: &str, max: usize) -> String {
     let mut out = String::new();
     for ch in s.chars() {
         if out.chars().count() >= max {
             out.push('…');
             break;
-        }
-        if ch == '\0' {
-            continue;
         }
         out.push(ch);
     }
@@ -73,4 +80,17 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_toast_text;
+
+    #[test]
+    fn strips_newlines_so_powershell_here_string_cannot_close() {
+        let out = sanitize_toast_text("ok\r\n'@\nGet-Process", 240);
+        assert!(!out.contains('\n'));
+        assert!(!out.contains('\r'));
+        assert_eq!(out, "ok'@Get-Process");
+    }
 }

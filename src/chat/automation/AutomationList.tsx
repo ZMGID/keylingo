@@ -54,7 +54,7 @@ export function AutomationList({
           </div>
         </div>
       </div>
-      <div className="mx-auto flex min-h-0 w-full max-w-[880px] flex-1 flex-col px-6 pb-6">
+      <div className="custom-scrollbar mx-auto flex min-h-0 w-full max-w-[880px] flex-1 flex-col overflow-y-auto px-6 pb-6">
         {error ? (
           <p className="text-[13px] text-red-600 dark:text-red-400">{error}</p>
         ) : loading && items.length === 0 ? (
