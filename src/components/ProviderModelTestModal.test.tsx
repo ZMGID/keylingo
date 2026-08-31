@@ -62,4 +62,24 @@ describe('ProviderModelTestModal', () => {
     expect(peak).toBeLessThanOrEqual(MODEL_TEST_CONCURRENCY)
     expect(peak).toBeGreaterThan(1)
   })
+
+  it('keeps a status slot on every row before results arrive', () => {
+    const models = ['alpha', 'beta']
+    render(
+      <ProviderModelTestModal
+        providerId="p1"
+        baseUrl="https://example.com/v1"
+        apiKeys={['sk-test']}
+        apiFormat="openai_chat"
+        models={models}
+        lang="zh"
+        onClose={() => {}}
+      />,
+    )
+    const rows = document.querySelectorAll('.kv-mtest-row')
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row.querySelector('.kv-mtest-status')).not.toBeNull()
+    }
+  })
 })

@@ -6342,6 +6342,7 @@ input[type="password"]::-ms-clear {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  height: min(80vh, 560px);
   max-height: min(80vh, 560px);
 }
 
@@ -6582,6 +6583,7 @@ input[type="password"]::-ms-clear {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .kv-model-picker-title-row {
@@ -6602,6 +6604,7 @@ input[type="password"]::-ms-clear {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .kv-model-picker-search {
@@ -6634,6 +6637,7 @@ input[type="password"]::-ms-clear {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .kv-model-picker-manual .kv-input {
@@ -6644,8 +6648,7 @@ input[type="password"]::-ms-clear {
 
 .kv-model-picker-body {
   flex: 1 1 auto;
-  min-height: 120px;
-  max-height: 360px;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -6934,18 +6937,37 @@ input[type="password"]::-ms-clear {
   flex-shrink: 0;
 }
 
-/* ===== 供应商模型批量测试弹窗 ===== */
-.kv-model-test-modal {
+/* ===== 供应商模型批量测试弹窗 =====
+   高度钉死：结果/报错只在列表里滚，不能撑高弹窗——居中 overlay 一变高就会整块上下跳。 */
+.kv-modal.kv-model-test-modal {
   width: min(560px, calc(100vw - 48px));
+  max-width: min(560px, calc(100vw - 48px));
+  height: min(560px, calc(100vh - 64px));
+  max-height: min(560px, calc(100vh - 64px));
   display: flex;
   flex-direction: column;
-  max-height: min(640px, calc(100vh - 64px));
+  padding: 14px 16px 12px;
+  overflow: hidden;
+}
+.kv-mtest-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-bottom: 8px;
+}
+.kv-mtest-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
 }
 .kv-mtest-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-shrink: 0;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
@@ -6953,16 +6975,38 @@ input[type="password"]::-ms-clear {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow: auto;
-  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  flex: 1 1 auto;
   min-height: 0;
+  overscroll-behavior: contain;
+}
+.kv-mtest-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  text-align: center;
+}
+.kv-mtest-item {
+  border-bottom: 1px solid var(--border);
+}
+.kv-mtest-item:last-child {
+  border-bottom: none;
 }
 .kv-mtest-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 36px;
   padding: 8px 2px;
-  border-bottom: 1px solid var(--border);
+  overflow: hidden;
 }
 .kv-mtest-check {
   width: 15px;
@@ -6983,15 +7027,19 @@ input[type="password"]::-ms-clear {
 .kv-mtest-status {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   font-size: 11.5px;
   flex-shrink: 0;
+  width: 3.25rem;
+  height: 16px;
+  overflow: hidden;
 }
 .kv-mtest-status--ok { color: var(--success, #16a34a); }
 .kv-mtest-status--fail { color: var(--danger, #c44); }
 .kv-mtest-error {
-  margin: 0 2px 8px;
-  max-height: 140px;
+  margin: 0 2px 8px 25px;
+  max-height: 4.5em;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -7002,6 +7050,14 @@ input[type="password"]::-ms-clear {
   background: color-mix(in srgb, var(--danger, #c44) 8%, transparent);
   border-radius: 6px;
   padding: 6px 8px;
+}
+.kv-mtest-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 12px;
+  overflow: hidden;
 }
 
 /* ===== Capability Badges ===== */

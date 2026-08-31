@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { X, RefreshCw, Check } from 'lucide-react'
 import { api } from '../api/tauri'
 import type { ProviderRequestConfig } from '../api/tauri'
@@ -110,22 +111,35 @@ export function ProviderModelTestModal({
     if (runIdRef.current === runId) setRunning(false)
   }
 
-  return (
+  const statusClass = (status: Result['status'] | undefined) => {
+    if (status === 'ok') return 'kv-mtest-status kv-mtest-status--ok'
+    if (status === 'fail') return 'kv-mtest-status kv-mtest-status--fail'
+    return 'kv-mtest-status'
+  }
+
+  return createPortal(
     <div
-      className="kv-modal-backdrop"
+      className="kv-modal-backdrop kv-modal-backdrop--portal"
       data-tauri-drag-region="false"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="kv-modal kv-model-test-modal" data-tauri-drag-region="false" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-[14px] font-semibold">{t.title}</h3>
+      <div
+        className="kv kv-modal kv-model-test-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="kv-mtest-title"
+        data-tauri-drag-region="false"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="kv-mtest-head">
+          <h3 id="kv-mtest-title" className="kv-mtest-title">{t.title}</h3>
           <IconButton size="xs" onClick={onClose} label={t.close} data-tauri-drag-region="false">
             <X size={14} />
           </IconButton>
         </div>
 
         {models.length === 0 ? (
-          <p className="kv-panel-body py-4">{t.empty}</p>
+          <p className="kv-mtest-empty">{t.empty}</p>
         ) : (
           <>
             <div className="kv-mtest-toolbar">
@@ -144,7 +158,7 @@ export function ProviderModelTestModal({
               {models.map((model) => {
                 const res = results[model]
                 return (
-                  <li key={model}>
+                  <li key={model} className="kv-mtest-item">
                     <div className="kv-mtest-row">
                       <input
                         type="checkbox"
@@ -155,15 +169,17 @@ export function ProviderModelTestModal({
                       />
                       <ModelIcon model={model} size={16} />
                       <span className="kv-mtest-name" title={model}>{model}</span>
-                      {res?.status === 'testing' && (
-                        <span className="kv-mtest-status"><RefreshCw size={12} className="animate-spin" /></span>
-                      )}
-                      {res?.status === 'ok' && (
-                        <span className="kv-mtest-status kv-mtest-status--ok"><Check size={13} strokeWidth={2.5} />{t.ok}</span>
-                      )}
-                      {res?.status === 'fail' && (
-                        <span className="kv-mtest-status kv-mtest-status--fail"><X size={13} strokeWidth={2.5} />{t.fail}</span>
-                      )}
+                      <span className={statusClass(res?.status)}>
+                        {res?.status === 'testing' && (
+                          <RefreshCw size={12} className="animate-spin" />
+                        )}
+                        {res?.status === 'ok' && (
+                          <><Check size={13} strokeWidth={2.5} />{t.ok}</>
+                        )}
+                        {res?.status === 'fail' && (
+                          <><X size={13} strokeWidth={2.5} />{t.fail}</>
+                        )}
+                      </span>
                     </div>
                     {res?.status === 'fail' && res.error && (
                       <pre className="kv-mtest-error">{res.error}</pre>
@@ -172,22 +188,25 @@ export function ProviderModelTestModal({
                 )
               })}
             </ul>
-
-            <div className="flex justify-end gap-2 pt-3">
-              <Button variant="ghost" onClick={onClose} data-tauri-drag-region="false">{t.close}</Button>
-              <Button
-                variant="primary"
-                onClick={runTests}
-                disabled={running || selected.size === 0}
-                data-tauri-drag-region="false"
-              >
-                <RefreshCw size={12} className={running ? 'animate-spin' : ''} />
-                {running ? t.running : t.run}
-              </Button>
-            </div>
           </>
         )}
+
+        <div className="kv-mtest-foot">
+          <Button variant="ghost" onClick={onClose} data-tauri-drag-region="false">{t.close}</Button>
+          {models.length > 0 && (
+            <Button
+              variant="primary"
+              onClick={runTests}
+              disabled={running || selected.size === 0}
+              data-tauri-drag-region="false"
+            >
+              <RefreshCw size={12} className={running ? 'animate-spin' : ''} />
+              {running ? t.running : t.run}
+            </Button>
+          )}
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
