@@ -60,6 +60,34 @@ describe('matchModel', () => {
     expect(info?.capabilities?.imageGeneration).toBe(true)
   })
 
+  it('matches current Grok Imagine image ids without collapsing variants', () => {
+    expect(matchModel('grok-imagine-image')?.displayName).toBe('Grok Imagine Image')
+    expect(matchModel('grok-imagine-image')?.capabilities?.imageGeneration).toBe(true)
+    expect(matchModel('grok-imagine-image-2.0')?.displayName).toBe('Grok Imagine Image 2.0')
+    expect(matchModel('grok-imagine-image-2.0')?.displayName).not.toBe('Grok Imagine Image')
+    expect(matchModel('x-ai/grok-imagine-image-2.0')?.displayName).toBe('Grok Imagine Image 2.0')
+    expect(matchModel('grok-imagine-image-quality')?.displayName).toBe('Grok Imagine Image Quality')
+    expect(matchModel('grok-imagine-image-quality')?.displayName).not.toBe('Grok Imagine Image')
+    expect(matchModel('x-ai/grok-imagine-image-quality')?.displayName).toBe('Grok Imagine Image Quality')
+  })
+
+  it('matches current third-party image models used by Mixer', () => {
+    expect(matchModel('gemini-3.1-flash-lite-image')?.capabilities?.imageGeneration).toBe(true)
+    expect(matchModel('google/gemini-3.1-flash-lite-image')?.displayName).toBe(
+      'Gemini 3.1 Flash Lite Image',
+    )
+    expect(matchModel('nano-banana-2')?.displayName).toBe('Nano Banana 2')
+    expect(matchModel('nano-banana-2')?.displayName).not.toBe('Nano Banana')
+    expect(matchModel('qwen/qwen-image-3')?.displayName).toBe('Qwen Image 3')
+    expect(matchModel('qwen-image-3-pro')?.displayName).toBe('Qwen Image 3 Pro')
+    expect(matchModel('qwen-image-3')?.displayName).not.toBe('Qwen Image')
+    expect(matchModel('krea-2-large')?.capabilities?.imageGeneration).toBe(true)
+    expect(matchModel('meta/muse-image')?.displayName).toBe('Muse Image')
+    expect(matchModel('mai-image-2.5-pro')?.displayName).toBe('MAI Image 2.5 Pro')
+    expect(matchModel('riverflow-v2.5-pro')?.displayName).toBe('Riverflow V2.5 Pro')
+    expect(matchModel('black-forest-labs/flux.2-klein-4b')?.displayName).toBe('FLUX.2 Klein 4B')
+  })
+
   it('matches the latest official Kimi model ids', () => {
     const k3 = matchModel('kimi-k3')
     expect(k3?.displayName).toBe('Kimi K3')

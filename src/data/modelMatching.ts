@@ -215,6 +215,14 @@ function matchKnownImageGenerationModel(modelName: string): ModelInfo | null {
   if (/^dall-e-[a-z0-9][a-z0-9.-]*$/.test(modelName)) {
     return knownImageGenerationModelInfo(modelName, modelName !== 'dall-e-3')
   }
+  // 库未收录的新变体：Mixer 生图槽只认 imageGeneration=true，不能让它们掉出列表。
+  if (
+    /^grok-imagine-image(?:-|$)/.test(modelName)
+    || /^nano-banana(?:-|$)/.test(modelName)
+    || /^qwen-image(?:-|$)/.test(modelName)
+  ) {
+    return knownImageGenerationModelInfo(modelName, true)
+  }
   return null
 }
 

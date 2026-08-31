@@ -498,7 +498,7 @@ pub fn build_chat_system_prompt_with_segments(
             .iter()
             .any(|tool| tool.as_str() == "mixer_generate_image")
         {
-            action_examples.push("generating an image");
+            action_examples.push("generating or editing an image");
         }
         if action_examples.is_empty() {
             action_examples.push("using an enabled tool");
@@ -971,7 +971,7 @@ fn native_tools_prompt(available_builtin_tools: &[String], _has_workbench: bool)
     }
     if has_image_generation {
         bullets.push(
-            "When the user asks to create, generate, or draw an image, call mixer_generate_image; do not merely describe it.".to_string(),
+            "When the user asks to create, generate, draw, or edit an image, call mixer_generate_image; do not merely describe it. Pass paths or artifact_ids to edit existing images; this turn's attached images are used automatically if omitted.".to_string(),
         );
     }
     if has_advisor {
@@ -1759,6 +1759,15 @@ mod tests {
             !p2.contains("file_path:line_number"),
             "read-only should omit discipline: {p2}"
         );
+    }
+
+    #[test]
+    fn native_tools_prompt_tells_model_to_edit_images_via_mixer() {
+        let prompt =
+            native_tools_prompt(&["mixer_generate_image".to_string()], false).expect("prompt");
+        assert!(prompt.contains("mixer_generate_image"), "{prompt}");
+        assert!(prompt.contains("edit"), "{prompt}");
+        assert!(prompt.contains("artifact_ids"), "{prompt}");
     }
 
     #[test]

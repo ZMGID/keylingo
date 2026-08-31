@@ -684,7 +684,7 @@ pub fn mixer_generate_image_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "mixer__generate_image".to_string(),
         name: "mixer_generate_image".to_string(),
-        description: "Generate image artifacts from a text prompt using the Mixer image generation model configured in Settings.".to_string(),
+        description: "Generate or edit image artifacts using the Mixer image generation model configured in Settings. For image-to-image / edits, pass paths of local images or artifact_ids of images generated earlier in this conversation. If the user attached images this turn and you omit both, those attachments are used automatically.".to_string(),
         source: "mixer".to_string(),
         server_id: None,
         server_name: Some("Mixer".to_string()),
@@ -693,7 +693,7 @@ pub fn mixer_generate_image_tool() -> ChatToolDefinition {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Detailed image generation prompt"
+                    "description": "Detailed image generation or edit prompt"
                 },
                 "size": {
                     "type": "string",
@@ -710,6 +710,20 @@ pub fn mixer_generate_image_tool() -> ChatToolDefinition {
                     "minimum": 1,
                     "maximum": 4,
                     "description": "Number of images to generate"
+                },
+                "paths": {
+                    "type": "array",
+                    "description": "Local image files to edit or use as references. Use Kivio attachment copy paths from this turn, or files you already read.",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "maxItems": 4
+                },
+                "artifact_ids": {
+                    "type": "array",
+                    "description": "IDs of images generated earlier in this conversation to edit or use as references.",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "maxItems": 4
                 }
             },
             "required": ["prompt"]

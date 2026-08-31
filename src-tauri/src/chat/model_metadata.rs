@@ -702,8 +702,17 @@ fn image_generation_model_name_heuristic(provider: &ModelProvider, model: &str) 
         "dall-e",
         "grok-imagine-image",
         "gemini-3.1-flash-image",
+        "gemini-3.1-flash-lite-image",
         "gemini-3-pro-image",
         "gemini-2.5-flash-image",
+        "nano-banana",
+        "qwen-image",
+        "glm-image",
+        "hy-image",
+        "seedream",
+        "krea",
+        "muse-image",
+        "mai-image",
         "flux",
         "recraft",
         "riverflow",
@@ -993,6 +1002,36 @@ mod tests {
 
         // 包含匹配路径：带 tag 的变体（`gemma4:31b`）靠前缀/包含吃到 `gemma4`
         assert_eq!(db_display_name("gemma4:31b").as_deref(), Some("Gemma 4"));
+
+        // 生图：Grok Imagine 各档必须是独立条目，不能前缀塌到 quality / 基线
+        assert_eq!(
+            db_display_name("grok-imagine-image").as_deref(),
+            Some("Grok Imagine Image")
+        );
+        assert_eq!(
+            db_display_name("grok-imagine-image-2.0").as_deref(),
+            Some("Grok Imagine Image 2.0")
+        );
+        assert_eq!(
+            db_display_name("x-ai/grok-imagine-image-2.0").as_deref(),
+            Some("Grok Imagine Image 2.0")
+        );
+        assert_eq!(
+            db_display_name("grok-imagine-image-quality").as_deref(),
+            Some("Grok Imagine Image Quality")
+        );
+        assert_eq!(
+            model_database_image_generation("grok-imagine-image"),
+            Some(true)
+        );
+        assert_eq!(
+            model_database_image_generation("gemini-3.1-flash-lite-image"),
+            Some(true)
+        );
+        assert_eq!(
+            db_display_name("qwen-image-3").as_deref(),
+            Some("Qwen Image 3")
+        );
 
         // 未知模型
         assert!(model_database_entry("totally-unknown-model-xyz-9999").is_none());

@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-08-29",
+    "version": "2026-08-31",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -26,6 +26,8 @@
       "https://platform.openai.com/docs/api-reference/images/create",
       "https://openrouter.ai/docs/guides/overview/multimodal/image-generation",
       "https://docs.x.ai/developers/model-capabilities/images/generation",
+      "https://docs.x.ai/developers/models",
+      "https://openrouter.ai/api/v1/models?output_modalities=image",
       "https://docs.x.ai/developers/grok-4-6",
       "https://docs.x.ai/developers/models/grok-4.6",
       "https://cursor.com/docs/models/cursor-composer-2-5",
@@ -506,6 +508,41 @@
     "contextWindow": 131072,
     "maxOutput": 32768,
     "capabilities": { "vision": true, "functionCalling": false, "reasoning": true, "streaming": true, "webSearch": true, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "gemini-3.1-flash-lite-image": {
+    "displayName": "Gemini 3.1 Flash Lite Image",
+    "contextWindow": 65536,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": true, "streaming": true, "webSearch": true, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "nano-banana-2-lite": {
+    "displayName": "Nano Banana 2 Lite",
+    "contextWindow": 65536,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": true, "streaming": true, "webSearch": true, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "nano-banana-2": {
+    "displayName": "Nano Banana 2",
+    "contextWindow": 131072,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": true, "streaming": true, "webSearch": true, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "nano-banana-pro": {
+    "displayName": "Nano Banana Pro",
+    "contextWindow": 131072,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": true, "streaming": true, "webSearch": true, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "nano-banana": {
+    "displayName": "Nano Banana",
+    "contextWindow": 32768,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
     "pricing": { "input": 0.00, "output": 0.00 }
   },
   "gemini-3-pro-image": {
@@ -1003,6 +1040,28 @@
     "pricing": { "input": 0.20, "output": 1.10 }
   },
 
+  "qwen-image-3-pro": {
+    "displayName": "Qwen Image 3 Pro",
+    "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "qwen-image-3": {
+    "displayName": "Qwen Image 3",
+    "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "qwen-image": {
+    "displayName": "Qwen Image",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+
   "qwen3.8-max": {
     "displayName": "Qwen3.8 Max",
     "contextWindow": 1000000,
@@ -1271,6 +1330,13 @@
     "pricing": { "input": 1.25, "output": 10.00, "cachedInput": 0.125 }
   },
 
+  "grok-imagine-image-2.0": {
+    "displayName": "Grok Imagine Image 2.0",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
   "grok-imagine-image-quality": {
     "displayName": "Grok Imagine Image Quality",
     "contextWindow": 0,
@@ -1283,6 +1349,20 @@
     "contextWindow": 0,
     "maxOutput": 0,
     "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "grok-imagine-image": {
+    "displayName": "Grok Imagine Image",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "x-ai/grok-imagine-image-2.0": {
+    "displayName": "Grok Imagine Image 2.0",
+    "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
     "pricing": { "input": 0.00, "output": 0.00 }
   },
   "x-ai/grok-imagine-image-quality": {
@@ -1511,9 +1591,44 @@
     "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
     "pricing": { "input": 0.00, "output": 0.00 }
   },
+  "flux.2-klein-4b": {
+    "displayName": "FLUX.2 Klein 4B",
+    "contextWindow": 40960,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
   "flux.2-klein": {
     "displayName": "FLUX.2 Klein",
     "contextWindow": 40960,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "krea-2-large": {
+    "displayName": "Krea 2 Large",
+    "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "krea-2-medium-turbo": {
+    "displayName": "Krea 2 Medium Turbo",
+    "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "krea-2-medium": {
+    "displayName": "Krea 2 Medium",
+    "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "muse-image": {
+    "displayName": "Muse Image",
+    "contextWindow": 65536,
     "maxOutput": 0,
     "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
     "pricing": { "input": 0.00, "output": 0.00 }
@@ -1549,6 +1664,20 @@
   "recraft-v3": {
     "displayName": "Recraft V3",
     "contextWindow": 65536,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "riverflow-v2.5-pro": {
+    "displayName": "Riverflow V2.5 Pro",
+    "contextWindow": 32768,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "riverflow-v2.5-fast": {
+    "displayName": "Riverflow V2.5 Fast",
+    "contextWindow": 32768,
     "maxOutput": 0,
     "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
     "pricing": { "input": 0.00, "output": 0.00 }
@@ -1591,6 +1720,13 @@
   "riverflow-v2-fast-preview": {
     "displayName": "Riverflow V2 Fast Preview",
     "contextWindow": 8192,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
+    "pricing": { "input": 0.00, "output": 0.00 }
+  },
+  "mai-image-2.5-pro": {
+    "displayName": "MAI Image 2.5 Pro",
+    "contextWindow": 4096,
     "maxOutput": 0,
     "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false, "imageGeneration": true },
     "pricing": { "input": 0.00, "output": 0.00 }

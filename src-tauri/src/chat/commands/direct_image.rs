@@ -29,13 +29,6 @@ pub(super) async fn complete_direct_image_generation_reply(
     retry_attempts: usize,
     entry: crate::chat::agent::AgentRunEntry,
 ) -> Result<(), String> {
-    if !last_user_image_paths.is_empty() {
-        return Err(
-            "当前直接选择的生图模型只支持文字生图；图生图/图片编辑请先使用文字提示，或之后单独配置支持图片编辑的流程。"
-                .to_string(),
-        );
-    }
-
     let prompt = direct_image_generation_prompt(conversation, last_user_api_content)?;
     let arguments = serde_json::json!({
         "prompt": prompt,
@@ -43,6 +36,8 @@ pub(super) async fn complete_direct_image_generation_reply(
         "quality": "auto",
         "n": 1,
     });
+    let input_images =
+        crate::chat::image_generation::load_input_images_from_paths(last_user_image_paths)?;
     let started = Instant::now();
     emit_chat_stream_delta(
         app,
@@ -59,6 +54,7 @@ pub(super) async fn complete_direct_image_generation_reply(
             provider,
             &model,
             &arguments,
+            &input_images,
             retry_attempts,
             "Chat image generation",
         ) => result,
