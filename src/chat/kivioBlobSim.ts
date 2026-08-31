@@ -4,12 +4,22 @@ export const BODY_R = 78
 export const EYE_POINTS = 48
 export const BLOB_BLUE = '#1d6bf0'
 export const BLOB_EYE = '#f3efe6'
+export const BLOB_POKE_RED = '#e23b2e'
+
+function mixHex(a: string, b: string, t: number): string {
+  const u = clamp(t, 0, 1)
+  const n = (h: string, i: number) => parseInt(h.slice(1 + i * 2, 3 + i * 2), 16)
+  const m = (i: number) => Math.round(n(a, i) + (n(b, i) - n(a, i)) * u)
+  return `#${[0, 1, 2].map((i) => m(i).toString(16).padStart(2, '0')).join('')}`
+}
 
 /** 跟生成过程对齐的几张脸。几何是 Kivio 自己的 stadium，不是 xAI 眼环。 */
 export type BlobMood = 'idle' | 'think' | 'search' | 'work' | 'speak' | 'error'
 
 const DT = 1 / 120
-const SPR = {
+// 显式标注:两表三元取用后是同一类型,元组才能直接 spread 进 stepSpring(TS2556)。
+type SpringTable = Record<'spin' | 'x' | 'y' | 'squash' | 'blink' | 'gaze' | 'morph' | 'boost', readonly [number, number]>
+const SPR: SpringTable = {
   spin: [5, 0.9],
   x: [3.5, 1],
   y: [4, 1],
@@ -18,10 +28,22 @@ const SPR = {
   gaze: [13, 1],
   morph: [7, 1],
   boost: [9, 0.85],
-} as const
+}
+
+/** 闲置约 20fps，弹簧放慢，避免三帧切完看起来像跳。 */
+const SPR_IDLE: SpringTable = {
+  spin: [2.0, 1],
+  x: [1.6, 1],
+  y: [1.8, 1],
+  squash: [3.0, 1],
+  blink: [9, 1],
+  gaze: [2.6, 1],
+  morph: [2.2, 1],
+  boost: [3.2, 0.9],
+}
 
 const PLAY: Record<BlobMood, number[]> = {
-  idle: [0, 8, 3],
+  idle: [0, 8, 3, 10, 1, 9],
   think: [8, 15, 14, 12, 5],
   search: [9, 3, 12, 17, 2],
   work: [7, 15, 10, 16],
@@ -29,7 +51,7 @@ const PLAY: Record<BlobMood, number[]> = {
   error: [7, 16],
 }
 const HOLD: Record<BlobMood, [number, number]> = {
-  idle: [9000, 16000],
+  idle: [5000, 18000],
   think: [2000, 3600],
   search: [1000, 1800],
   work: [1800, 3200],
@@ -37,7 +59,7 @@ const HOLD: Record<BlobMood, [number, number]> = {
   error: [2200, 3800],
 }
 const BLINK: Record<BlobMood, [number, number] | null> = {
-  idle: [6000, 14000],
+  idle: [4000, 16000],
   think: [3500, 7000],
   search: [1600, 4000],
   work: [2800, 5500],
@@ -141,9 +163,15 @@ for (const id of Object.keys(EYE).map(Number)) EYE_CACHE[id] = eyesOf(id)
 
 type BlinkKey = { at: number; v: number }
 
-export function queueBlink(q: BlinkKey[], now: number, random: () => number) {
-  q.push({ at: now, v: 0.05 }, { at: now + 70, v: 0.05 }, { at: now + 150, v: 1.08 }, { at: now + 300, v: 1 })
-  if (random() < 0.14) q.push({ at: now + 370, v: 0.05 }, { at: now + 480, v: 1 })
+export function queueBlink(q: BlinkKey[], now: number, random: () => number, stretch = 1) {
+  const s = stretch
+  q.push(
+    { at: now, v: 0.05 },
+    { at: now + 70 * s, v: 0.05 },
+    { at: now + 150 * s, v: 1.08 },
+    { at: now + 300 * s, v: 1 },
+  )
+  if (random() < 0.14) q.push({ at: now + 370 * s, v: 0.05 }, { at: now + 480 * s, v: 1 })
 }
 
 export function consumeBlink(q: BlinkKey[], now: number): number | null {
@@ -152,19 +180,25 @@ export function consumeBlink(q: BlinkKey[], now: number): number | null {
   return key
 }
 
-export function hopY(hopAt: number, now: number): number | null {
+export function hopY(hopAt: number, now: number, scale = 1, timeScale = 1): number | null {
   if (hopAt < 0) return 0
-  const et = (now - hopAt) / 1000
+  const et = (now - hopAt) / 1000 / Math.max(timeScale, 0.01)
   if (et >= HOP_DUR) return null
   let en = 0
   for (const seg of HOP_SEGS) {
     if (et < en + seg.d) {
       const bn = (et - en) / seg.d
-      return -4 * seg.h * bn * (1 - bn) * 0.5
+      return -4 * seg.h * bn * (1 - bn) * 0.5 * scale
     }
     en += seg.d
   }
   return 0
+}
+
+/** 偏长间隔，避免每次切换都像节拍器。 */
+function spanMs(min: number, max: number, u: number): number {
+  const t = 1 - (1 - u) * (1 - u)
+  return min + (max - min) * t
 }
 
 export function isSearchToolName(name: string): boolean {
@@ -198,12 +232,57 @@ interface Pose {
   boost: number
 }
 
+interface IdleBias {
+  spin: number
+  tx: number
+  ty: number
+  squash: number
+}
+
 interface PoseCtx {
   nodUntil: number
   nodEnd: number
   impulseAt: number
   shakeUntil: number
   hopUntil: number
+  biasUntil: number
+  bias: IdleBias
+}
+
+function nextIdleBias(
+  rand: (a: number, b: number) => number,
+  sign: () => number,
+): IdleBias & { hold: [number, number]; hop: boolean } {
+  const r = rand(0, 1)
+  if (r < 0.38) {
+    return { spin: 0, tx: 0, ty: 0, squash: 1, hold: [4000, 14000], hop: false }
+  }
+  if (r < 0.7) {
+    const d = sign()
+    return {
+      spin: d * rand(6, 14),
+      tx: d * rand(2.5, 7),
+      ty: rand(-1.5, 1.2),
+      squash: 1,
+      hold: [3500, 12000],
+      hop: false,
+    }
+  }
+  if (r < 0.84) {
+    return { spin: rand(-3, 3), tx: 0, ty: -rand(1.5, 4), squash: 1.02, hold: [2800, 9000], hop: false }
+  }
+  if (r < 0.93) {
+    return { spin: 0, tx: 0, ty: rand(1.5, 4), squash: 0.984, hold: [3500, 11000], hop: false }
+  }
+  const d = sign()
+  return {
+    spin: d * rand(4, 10),
+    tx: d * rand(2, 5),
+    ty: -2,
+    squash: 1,
+    hold: [4000, 13000],
+    hop: true,
+  }
 }
 
 function applyPose(mood: BlobMood, mt: number, now: number, ctx: PoseCtx, rand: (a: number, b: number) => number): Pose {
@@ -214,10 +293,15 @@ function applyPose(mood: BlobMood, mt: number, now: number, ctx: PoseCtx, rand: 
   let lid = 1
   let boost = 1
   if (mood === 'idle') {
-    spin = 0
-    tx = 0
-    ty = 0
-    squash = 1
+    const br = Math.sin(mt * 0.48) * 0.62 + Math.sin(mt * 0.91) * 0.38
+    spin = Math.sin(mt * 0.13) * 2 + ctx.bias.spin
+    tx = Math.sin(mt * 0.11) * 1.6 + ctx.bias.tx
+    ty = br * 2.2 + ctx.bias.ty
+    squash = 1 + br * 0.016 + (ctx.bias.squash - 1)
+    if (now < ctx.shakeUntil) {
+      spin += Math.sin(now * 0.055) * 8
+      tx += Math.sin(now * 0.08) * 5
+    }
   } else if (mood === 'think') {
     spin = -12 + Math.sin(mt * 0.35) * 7
     tx = Math.sin(mt * 0.3) * 8
@@ -263,10 +347,10 @@ function applyPose(mood: BlobMood, mt: number, now: number, ctx: PoseCtx, rand: 
 
 function nextGaze(mood: BlobMood, rand: (a: number, b: number) => number, sign: () => number) {
   if (mood === 'idle') {
-    if (rand(0, 1) < 0.28) {
-      return { x: sign() * rand(0.35, 0.85) * 12, y: rand(-0.4, 0.4) * 8, hold: [900, 1800] as [number, number] }
+    if (rand(0, 1) < 0.52) {
+      return { x: sign() * rand(0.22, 0.72) * 11, y: rand(-0.4, 0.32) * 7, hold: [2000, 10000] as [number, number] }
     }
-    return { x: 0, y: 0, hold: [2500, 5500] as [number, number] }
+    return { x: 0, y: 0, hold: [3000, 14000] as [number, number] }
   }
   if (mood === 'think') return { x: sign() * rand(0.5, 1) * 16, y: -rand(0.4, 1) * 10, hold: [1500, 2800] as [number, number] }
   if (mood === 'search') return { x: sign() * rand(0.7, 1) * 16, y: rand(-1, 1) * 10, hold: [550, 1150] as [number, number] }
@@ -276,6 +360,7 @@ function nextGaze(mood: BlobMood, rand: (a: number, b: number) => number, sign: 
 }
 
 function hopCadence(mood: BlobMood): [number, number] | null {
+  if (mood === 'idle') return [22000, 56000]
   if (mood === 'search') return [4000, 7000]
   if (mood === 'work') return [6000, 9000]
   if (mood === 'think') return [8000, 12000]
@@ -289,11 +374,12 @@ export interface BlobPaint {
   eyes: [{ d: string; transform: string }, { d: string; transform: string }]
 }
 
-/** 闲置睡到下一次眨眼 / 表情切换；忙碌跟 vsync。 */
+/** 闲置用呼吸节拍（约 20fps）；忙碌跟 vsync。 */
 export const BLOB_IDLE_WAKE_MIN_MS = 48
 export const BLOB_IDLE_WAKE_MAX_MS = 16_000
+export const BLOB_IDLE_BREATHE_MS = 48
 
-/** `null` = 不排下一帧（隐藏 / 屏外 / 失焦 / 被覆盖 / 减弱动态）。`0` = rAF。`>0` = 睡到下一次眨眼。 */
+/** `null` = 不排下一帧（隐藏 / 屏外 / 失焦 / 被覆盖 / 减弱动态）。`0` = rAF。`>0` = 睡到下一次节拍。 */
 export function blobScheduleMs(opts: {
   reducedMotion: boolean
   hidden: boolean
@@ -314,6 +400,8 @@ export interface BlobSimDebug {
   eyeTo: number
   spin: number
   blink: number
+  heat: number
+  pokes: number
 }
 
 export class KivioBlobSim {
@@ -340,10 +428,23 @@ export class KivioBlobSim {
   private winkAt = -1e9
   private winkEye = 0
   private winkUntil = 0
+  private winkDur = 320
   private hopAt = -1
+  private pokeHeat = 0
+  private pokeCount = 0
+  private lastPokeAt = -1e9
+  private heatHoldUntil = 0
   private blinkQ: BlinkKey[] = []
   private inited = false
-  private ctx: PoseCtx = { nodUntil: 0, nodEnd: 0, impulseAt: 0, shakeUntil: 0, hopUntil: 0 }
+  private ctx: PoseCtx = {
+    nodUntil: 0,
+    nodEnd: 0,
+    impulseAt: 0,
+    shakeUntil: 0,
+    hopUntil: 0,
+    biasUntil: 0,
+    bias: { spin: 0, tx: 0, ty: 0, squash: 1 },
+  }
 
   constructor(opts: { random?: () => number; reducedMotion?: boolean } = {}) {
     this.random = opts.random ?? Math.random
@@ -356,43 +457,89 @@ export class KivioBlobSim {
     const list = PLAY[mood]
     this.eyeIdx = 0
     if (changed) this.morphTo(list[0])
-    this.eyeUntil = now + this.rand(...HOLD[mood])
-    this.blinkUntil = now + this.rand(900, 2800)
-    this.gazeUntil = now + this.rand(280, 900)
+    this.eyeUntil = now + (mood === 'idle' ? this.span(...HOLD[mood]) : this.rand(...HOLD[mood]))
+    this.blinkUntil = now + (mood === 'idle' ? this.span(1800, 6000) : this.rand(900, 2800))
+    this.gazeUntil = now + (mood === 'idle' ? this.span(800, 4200) : this.rand(280, 900))
     const hopEvery = hopCadence(mood)
     this.ctx = {
       nodUntil: now + 1600,
       nodEnd: 0,
       impulseAt: now + 600,
       shakeUntil: 0,
-      hopUntil: now + (hopEvery ? this.rand(...hopEvery) : 1e12),
+      hopUntil: now + (hopEvery ? (mood === 'idle' ? this.span(...hopEvery) : this.rand(...hopEvery)) : 1e12),
+      biasUntil: mood === 'idle' ? now + this.span(3000, 10000) : 1e12,
+      bias: { spin: 0, tx: 0, ty: 0, squash: 1 },
     }
     this.blinkQ = []
-    queueBlink(this.blinkQ, now, this.random)
+    queueBlink(this.blinkQ, now, this.random, mood === 'idle' ? 2.6 : 1)
   }
 
-  poke(now: number) {
-    queueBlink(this.blinkQ, now, this.random)
+  poke(now: number, lookX?: number): number {
+    if (now - this.lastPokeAt > 4200) this.pokeCount = 0
+    this.pokeCount += 1
+    this.lastPokeAt = now
+    this.pokeHeat = Math.min(1, this.pokeHeat + (this.pokeCount < 4 ? 0.16 : 0.22))
+    this.heatHoldUntil = now + 3200
+    queueBlink(this.blinkQ, now, this.random, this.mood === 'idle' ? 2.6 : 1)
+    const dir = lookX != null ? (lookX < 0 ? -1 : 1) : this.sign()
+    const glance = lookX != null ? Math.min(1, Math.max(0.35, Math.abs(lookX))) : this.rand(0.45, 1)
+    this.gazeX.t = dir * this.rand(8, 16) * glance
+    this.gazeY.t = this.rand(-6, 4)
+    this.gazeUntil = now + this.rand(this.mood === 'idle' ? 1400 : 700, this.mood === 'idle' ? 2800 : 1400)
+    this.hopAt = now
+    this.winkAt = now
+    this.winkEye = this.random() < 0.5 ? 0 : 1
+    this.winkDur = this.mood === 'idle' ? 700 : 320
+    if (this.pokeCount >= 4) this.morphTo(5)
+    if (this.pokeCount >= 7) this.morphTo(13)
+    if (this.pokeCount >= 5) this.ctx.shakeUntil = now + 420
+    if (this.mood === 'idle') {
+      this.ctx.bias = {
+        spin: dir * this.rand(8, 16),
+        tx: dir * this.rand(4, 9),
+        ty: -3,
+        squash: 1.02,
+      }
+      this.ctx.biasUntil = now + this.span(2500, 8000)
+    }
+    return this.pokeCount
+  }
+
+  nudge(now: number) {
+    queueBlink(this.blinkQ, now, this.random, this.mood === 'idle' ? 2.6 : 1)
+    this.gazeX.t = this.sign() * this.rand(6, 12)
+    this.gazeY.t = this.rand(-4, 3)
+    this.gazeUntil = now + this.rand(700, 1400)
   }
 
   debug(): BlobSimDebug {
-    return { mood: this.mood, eyeTo: this.eyeTo, spin: this.spin.x, blink: this.blink.x }
+    return {
+      mood: this.mood,
+      eyeTo: this.eyeTo,
+      spin: this.spin.x,
+      blink: this.blink.x,
+      heat: this.pokeHeat,
+      pokes: this.pokeCount,
+    }
   }
 
-  /** 眨眼 / 跳 / 表情切换 / 生成中跟 vsync；闲置与出错间隙只睡到下一次事件。 */
+  /** 闲置眨眼可短时拉满帧；跳和换脸走 20fps，弹簧已经按这个节拍放慢。 */
   wantsHighFps(now: number): boolean {
     if (this.reduced) return false
     if (this.blinkQ.length > 0) return true
+    if (now < this.winkAt + this.winkDur) return true
     if (this.hopAt >= 0) return true
-    if (this.morph.x < 0.97) return true
-    if (now < this.winkAt + 320) return true
+    if (now < this.ctx.shakeUntil) return true
     if (this.mood === 'idle') return false
+    if (this.morph.x < 0.97) return true
+    if (now < this.ctx.nodEnd) return true
     if (this.mood === 'error') return now < this.ctx.shakeUntil
     return true
   }
 
-  /** 闲置下一帧该何时醒：眨眼 / wink / 眼形切换 / 出错抖动，取最近的一个。 */
+  /** 闲置按呼吸节拍醒；出错只睡到下一次抖动。 */
   nextIdleWakeMs(now: number): number {
+    if (this.mood === 'idle') return BLOB_IDLE_BREATHE_MS
     const wakes = [this.blinkUntil, this.eyeUntil]
     if (WINK.has(this.mood)) wakes.push(this.winkUntil)
     if (this.mood === 'error') wakes.push(this.ctx.impulseAt)
@@ -404,7 +551,7 @@ export class KivioBlobSim {
       this.t0 = now
       this.last = now
       this.setMood(this.mood, now)
-      this.winkUntil = now + this.rand(4000, 8000)
+      this.winkUntil = now + (this.mood === 'idle' ? this.span(8000, 22000) : this.rand(4000, 8000))
       this.inited = true
     }
     const dt = Math.min((now - this.last) / 1000, 0.08)
@@ -416,17 +563,22 @@ export class KivioBlobSim {
     this.ty.t = pose.ty
     this.squash.t = pose.squash
     this.boost.t = pose.boost
+    if (this.mood === 'idle') {
+      this.spin.t += this.gazeX.t * 0.48
+      this.tx.t += this.gazeX.t * 0.3
+      this.ty.t += this.gazeY.t * 0.16
+    }
 
     if (now >= this.eyeUntil) {
       const list = PLAY[this.mood]
       this.eyeIdx = (this.eyeIdx + 1) % list.length
       this.morphTo(list[this.eyeIdx])
-      this.eyeUntil = now + this.rand(...HOLD[this.mood])
+      this.eyeUntil = now + (this.mood === 'idle' ? this.span(...HOLD[this.mood]) : this.rand(...HOLD[this.mood]))
     }
     const cad = BLINK[this.mood]
     if (cad && now >= this.blinkUntil) {
-      queueBlink(this.blinkQ, now, this.random)
-      this.blinkUntil = now + this.rand(...cad)
+      queueBlink(this.blinkQ, now, this.random, this.mood === 'idle' ? 2.6 : 1)
+      this.blinkUntil = now + (this.mood === 'idle' ? this.span(...cad) : this.rand(...cad))
     }
     const key = consumeBlink(this.blinkQ, now)
     this.blink.t = key ?? (this.blinkQ.length ? this.blink.t : pose.lid)
@@ -435,31 +587,39 @@ export class KivioBlobSim {
       const gz = nextGaze(this.mood, (a, b) => this.rand(a, b), () => this.sign())
       this.gazeX.t = gz.x
       this.gazeY.t = gz.y
-      this.gazeUntil = now + this.rand(...gz.hold)
+      this.gazeUntil = now + (this.mood === 'idle' ? this.span(...gz.hold) : this.rand(...gz.hold))
     }
     if (WINK.has(this.mood) && now >= this.winkUntil) {
       this.winkAt = now
       this.winkEye = this.random() < 0.5 ? 0 : 1
-      this.winkUntil = now + this.rand(4500, 10000)
+      this.winkDur = this.mood === 'idle' ? 700 : 320
+      this.winkUntil = now + (this.mood === 'idle' ? this.span(8000, 24000) : this.rand(4500, 10000))
     }
     const hopEvery = hopCadence(this.mood)
     if (hopEvery && now >= this.ctx.hopUntil && this.hopAt < 0) {
       this.hopAt = now
-      this.ctx.hopUntil = now + this.rand(...hopEvery)
+      this.ctx.hopUntil = now + (this.mood === 'idle' ? this.span(...hopEvery) : this.rand(...hopEvery))
+    }
+    if (this.mood === 'idle' && !this.reduced && now >= this.ctx.biasUntil) {
+      const next = nextIdleBias((a, b) => this.rand(a, b), () => this.sign())
+      this.ctx.bias = { spin: next.spin, tx: next.tx, ty: next.ty, squash: next.squash }
+      this.ctx.biasUntil = now + this.span(...next.hold)
+      if (next.hop && this.hopAt < 0) this.hopAt = now
     }
 
     const n = Math.max(1, Math.ceil(dt / DT))
     const step = dt / n
+    const spr = this.mood === 'idle' ? SPR_IDLE : SPR
     for (let i = 0; i < n; i++) {
-      stepSpring(this.spin, ...SPR.spin, step)
-      stepSpring(this.tx, ...SPR.x, step)
-      stepSpring(this.ty, ...SPR.y, step)
-      stepSpring(this.squash, ...SPR.squash, step)
-      stepSpring(this.blink, ...SPR.blink, step)
-      stepSpring(this.gazeX, ...SPR.gaze, step)
-      stepSpring(this.gazeY, ...SPR.gaze, step)
-      stepSpring(this.morph, ...SPR.morph, step)
-      stepSpring(this.boost, ...SPR.boost, step)
+      stepSpring(this.spin, ...spr.spin, step)
+      stepSpring(this.tx, ...spr.x, step)
+      stepSpring(this.ty, ...spr.y, step)
+      stepSpring(this.squash, ...spr.squash, step)
+      stepSpring(this.blink, ...spr.blink, step)
+      stepSpring(this.gazeX, ...spr.gaze, step)
+      stepSpring(this.gazeY, ...spr.gaze, step)
+      stepSpring(this.morph, ...spr.morph, step)
+      stepSpring(this.boost, ...spr.boost, step)
     }
     if (this.reduced) {
       this.spin.x = 0
@@ -474,7 +634,20 @@ export class KivioBlobSim {
       this.hopAt = -1
     }
 
-    let hop = hopY(this.hopAt, now)
+    if (now > this.heatHoldUntil && this.pokeHeat > 0) {
+      this.pokeHeat = Math.max(0, this.pokeHeat - dt * 0.32)
+      if (this.pokeHeat <= 0.01) {
+        this.pokeHeat = 0
+        this.pokeCount = 0
+      }
+    }
+
+    let hop = hopY(
+      this.hopAt,
+      now,
+      this.mood === 'idle' ? 0.36 + this.pokeHeat * 0.5 : 1,
+      this.mood === 'idle' ? 2.1 : 1,
+    )
     if (hop == null) {
       this.hopAt = -1
       hop = 0
@@ -485,19 +658,20 @@ export class KivioBlobSim {
     const polys = [lerpPoly(from[0], to[0], k), lerpPoly(from[1], to[1], k)]
     const gx = this.gazeX.x
     const gy = this.gazeY.x
-    const pulse = 1 + 0.07 * Math.sin(k * Math.PI)
+    const pulse = 1 + (this.mood === 'idle' ? 0.03 : 0.07) * Math.sin(k * Math.PI)
     const boost = this.boost.x
     const eyes = [0, 1].map((i) => {
       let lid = this.blink.x
-      if (i === this.winkEye && now < this.winkAt + 320) {
-        const xr = (now - this.winkAt) / 320
+      if (i === this.winkEye && now < this.winkAt + this.winkDur) {
+        const xr = (now - this.winkAt) / this.winkDur
         const fr = xr < 0.42 ? 1 - xr / 0.42 : (xr - 0.42) / 0.58
         lid = Math.min(lid, Math.max(fr, 0.04))
       }
       const [cx, cy] = centroid(polys[i])
       const live = this.mood !== 'idle'
-      const wobX = live ? Math.sin(now * 42e-5 + i) * 3.6 + Math.sin(now * 0.001 + i * 2) * 1.3 : 0
-      const wobY = live ? Math.sin(now * 58e-5 + i) * 2.2 : 0
+      const amp = live ? 1 : 0.28
+      const wobX = (Math.sin(now * 42e-5 + i) * 3.6 + Math.sin(now * 0.001 + i * 2) * 1.3) * amp
+      const wobY = Math.sin(now * 58e-5 + i) * 2.2 * amp
       const lookX = gx + wobX
       const lookY = gy + wobY
       const sx = (1 - Math.abs(gx) * 0.012) * boost * pulse
@@ -511,7 +685,11 @@ export class KivioBlobSim {
     return {
       rig: `translate(${this.tx.x.toFixed(2)} ${(this.ty.x + hop).toFixed(2)}) rotate(${this.spin.x.toFixed(2)} ${CX} ${CY})`,
       body: `translate(${CX} ${CY}) scale(1 ${this.squash.x.toFixed(3)}) translate(${-CX} ${-CY})`,
-      fill: this.mood === 'error' ? '#c45c2a' : BLOB_BLUE,
+      fill: this.mood === 'error'
+        ? '#c45c2a'
+        : this.pokeHeat <= 0
+          ? BLOB_BLUE
+          : mixHex(BLOB_BLUE, BLOB_POKE_RED, this.pokeHeat),
       eyes,
     }
   }
@@ -527,6 +705,10 @@ export class KivioBlobSim {
 
   private rand(a: number, b: number) {
     return a + this.random() * (b - a)
+  }
+
+  private span(a: number, b: number) {
+    return spanMs(a, b, this.random())
   }
 
   private sign() {

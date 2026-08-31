@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, type CSSProperties } from 'react'
+import { memo, useEffect, useImperativeHandle, useRef, forwardRef, type CSSProperties } from 'react'
 import {
   BLOB_BLUE,
   BLOB_EYE,
@@ -14,11 +14,18 @@ import { prefersReducedMotion } from './utils'
 
 export type { BlobMood }
 
+export interface KivioBlobHandle {
+  pokeAt: (clientX?: number) => void
+}
+
 interface KivioBlobProps {
   size?: number
   mood?: BlobMood
   /** 切会话覆盖层盖住时停表，避免和点阵脉冲叠两套动画。 */
   paused?: boolean
+  /** 变化时眨一眼 + 瞟一下（空态换文案）。连点升温不走这条。 */
+  pulse?: string | number | null
+  onPoke?: (streak: number) => void
 }
 
 function writeAttr(el: Element, name: string, value: string, prev: string): string {
@@ -27,7 +34,10 @@ function writeAttr(el: Element, name: string, value: string, prev: string): stri
   return value
 }
 
-export const KivioBlob = memo(function KivioBlob({ size = 28, mood = 'idle', paused = false }: KivioBlobProps) {
+export const KivioBlob = memo(forwardRef<KivioBlobHandle, KivioBlobProps>(function KivioBlob(
+  { size = 28, mood = 'idle', paused = false, pulse, onPoke }: KivioBlobProps,
+  ref,
+) {
   const hostRef = useRef<HTMLSpanElement>(null)
   const rigRef = useRef<SVGGElement>(null)
   const bodyRef = useRef<SVGCircleElement>(null)
@@ -36,15 +46,44 @@ export const KivioBlob = memo(function KivioBlob({ size = 28, mood = 'idle', pau
   const simRef = useRef<KivioBlobSim | null>(null)
   const armRef = useRef<(now?: number) => void>(() => {})
   const pausedRef = useRef(paused)
+  const pulseSkipRef = useRef(true)
+  const onPokeRef = useRef(onPoke)
+  onPokeRef.current = onPoke
   pausedRef.current = paused
   if (!simRef.current) {
     simRef.current = new KivioBlobSim({ reducedMotion: prefersReducedMotion() })
   }
 
+  const pokeAt = (clientX?: number) => {
+    const sim = simRef.current
+    const host = hostRef.current
+    if (!sim) return
+    let lookX: number | undefined
+    if (clientX != null && host) {
+      const rect = host.getBoundingClientRect()
+      if (rect.width > 0) lookX = ((clientX - rect.left) / rect.width) * 2 - 1
+    }
+    const streak = sim.poke(performance.now(), lookX)
+    onPokeRef.current?.(streak)
+    armRef.current()
+  }
+  const pokeAtRef = useRef(pokeAt)
+  pokeAtRef.current = pokeAt
+  useImperativeHandle(ref, () => ({ pokeAt: (clientX) => pokeAtRef.current(clientX) }), [])
+
   useEffect(() => {
     simRef.current?.setMood(mood, performance.now())
     armRef.current()
   }, [mood])
+
+  useEffect(() => {
+    if (pulseSkipRef.current) {
+      pulseSkipRef.current = false
+      return
+    }
+    simRef.current?.nudge(performance.now())
+    armRef.current()
+  }, [pulse])
 
   useEffect(() => {
     armRef.current()
@@ -59,7 +98,7 @@ export const KivioBlob = memo(function KivioBlob({ size = 28, mood = 'idle', pau
     const eye1 = eye1Ref.current
     if (!sim || !host || !rig || !body || !eye0 || !eye1) return
 
-    let last = { rig: '', body: '', fill: '', d0: '', t0: '', d1: '', t1: '' }
+    const last = { rig: '', body: '', fill: '', d0: '', t0: '', d1: '', t1: '' }
     const apply = (now: number) => {
       const p = sim.sample(now)
       last.rig = writeAttr(rig, 'transform', p.rig, last.rig)
@@ -154,9 +193,20 @@ export const KivioBlob = memo(function KivioBlob({ size = 28, mood = 'idle', pau
   return (
     <span
       ref={hostRef}
-      aria-hidden="true"
-      className="inline-flex shrink-0"
+      role="button"
+      tabIndex={0}
+      className="inline-flex shrink-0 cursor-pointer select-none"
       style={{ '--kv-stream-logo-size': `${size}px`, width: size, height: size } as CSSProperties}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return
+        event.preventDefault()
+        pokeAt(event.clientX)
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        pokeAt()
+      }}
     >
       <svg
         className="kv-stream-logo"
@@ -180,4 +230,4 @@ export const KivioBlob = memo(function KivioBlob({ size = 28, mood = 'idle', pau
       </svg>
     </span>
   )
-})
+}))

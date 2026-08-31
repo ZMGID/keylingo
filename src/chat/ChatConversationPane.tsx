@@ -1,12 +1,12 @@
-import { lazy, memo, Profiler, Suspense, type ProfilerOnRenderCallback, type ReactNode } from 'react'
+import { lazy, memo, Profiler, Suspense, useRef, type ProfilerOnRenderCallback, type ReactNode } from 'react'
 import { GitBranch, TriangleAlert, X } from 'lucide-react'
 import { ChatImageViewer } from './ChatImageViewer'
 import { ConversationLoadingState } from './ConversationLoadingState'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { useConversationTransition } from './conversationTransitionStore'
 import { InputBar, type InputBarProps } from './InputBar'
-import { KivioBlob } from './KivioBlob'
-import { emptyHeroLine } from './emptyHero'
+import { KivioBlob, type KivioBlobHandle } from './KivioBlob'
+import { useEmptyHeroJab, useEmptyHeroLine } from './emptyHero'
 import { TypewriterText } from './TypewriterText'
 import { QueuedMessages } from './QueuedMessages'
 import { IconButton } from '../components/Button'
@@ -25,6 +25,49 @@ function MessageListLoading() {
   return (
     <div className="chat-themed-surface flex flex-1 items-center justify-center">
       <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-800 dark:border-neutral-700 dark:border-t-neutral-200" />
+    </div>
+  )
+}
+
+function EmptyHeroHeading({
+  lang,
+  assistantName,
+  projectName,
+  setName,
+  seed,
+  active,
+}: {
+  lang: Lang
+  assistantName: string | null
+  projectName: string | null
+  setName: string | null
+  seed: string | null
+  active: boolean
+}) {
+  const blobRef = useRef<KivioBlobHandle>(null)
+  const { jab, onPoke } = useEmptyHeroJab(lang)
+  const greeting = useEmptyHeroLine({
+    lang,
+    assistantName,
+    projectName,
+    setName,
+    seed,
+    active: active && !jab,
+  })
+  const text = jab ?? greeting
+  return (
+    <div className="chat-motion-fade-up chat-empty-hero-heading">
+      <KivioBlob ref={blobRef} size={56} mood="idle" pulse={greeting} onPoke={onPoke} />
+      <h2
+        className="chat-empty-hero-title cursor-pointer select-none"
+        onPointerDown={(event) => {
+          if (event.button !== 0) return
+          event.preventDefault()
+          blobRef.current?.pokeAt(event.clientX)
+        }}
+      >
+        <TypewriterText text={text} active={active} />
+      </h2>
     </div>
   )
 }
@@ -138,22 +181,14 @@ export const ChatConversationPane = memo(function ChatConversationPane({
         {showEmptyHero ? (
           <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-10">
             <div className="chat-empty-hero-stack relative z-10 w-full max-w-4xl">
-              <div className="chat-motion-fade-up chat-empty-hero-heading">
-                <KivioBlob size={56} mood="idle" />
-                <h2 className="chat-empty-hero-title">
-                  <TypewriterText
-                    key={`${lang}:${currentConversationId}:${currentAssistantName}:${selectedProjectName}:${selectedSetName}`}
-                    text={emptyHeroLine({
-                      lang,
-                      assistantName: currentAssistantName,
-                      projectName: selectedProjectName,
-                      setName: selectedSetName,
-                      seed: currentConversationId,
-                    })}
-                    active={showEmptyHero}
-                  />
-                </h2>
-              </div>
+              <EmptyHeroHeading
+                lang={lang}
+                assistantName={currentAssistantName}
+                projectName={selectedProjectName}
+                setName={selectedSetName}
+                seed={currentConversationId}
+                active={showEmptyHero}
+              />
               <div className="chat-motion-fade-up" style={{ ['--chat-motion-delay' as string]: '120ms' }}>
                 <InputBar {...inputBarProps} layout="inline" />
               </div>
