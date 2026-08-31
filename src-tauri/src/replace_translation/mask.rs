@@ -392,15 +392,17 @@ fn feather_plate_edges(
             if coverage[index] == 0 {
                 continue;
             }
-            let on_edge = [(0i32, -1i32), (0, 1), (-1, 0), (1, 0)].iter().any(|(dx, dy)| {
-                let next_x = x + dx;
-                let next_y = y + dy;
-                next_x >= 0
-                    && next_y >= 0
-                    && next_x < width_i
-                    && next_y < height_i
-                    && coverage[next_y as usize * width as usize + next_x as usize] == 0
-            });
+            let on_edge = [(0i32, -1i32), (0, 1), (-1, 0), (1, 0)]
+                .iter()
+                .any(|(dx, dy)| {
+                    let next_x = x + dx;
+                    let next_y = y + dy;
+                    next_x >= 0
+                        && next_y >= 0
+                        && next_x < width_i
+                        && next_y < height_i
+                        && coverage[next_y as usize * width as usize + next_x as usize] == 0
+                });
             if !on_edge {
                 continue;
             }

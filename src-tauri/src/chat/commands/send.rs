@@ -168,7 +168,11 @@ pub(crate) async fn chat_send_message(
             let user_message = user_message.clone();
             let provisional_title = provisional_title.clone();
             move |latest| {
-                if latest.messages.iter().any(|item| item.id == user_message.id) {
+                if latest
+                    .messages
+                    .iter()
+                    .any(|item| item.id == user_message.id)
+                {
                     return Err(format!("message already exists: {}", user_message.id));
                 }
                 latest.messages.push(user_message);

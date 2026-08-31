@@ -500,8 +500,10 @@ pub fn ensure_chat_popout_window(
     );
     let (min_width, min_height) =
         chat_window_size_for_visible_content(POPOUT_MIN_INNER_WIDTH, POPOUT_MIN_INNER_HEIGHT);
-    let (default_width, default_height) =
-        chat_window_size_for_visible_content(POPOUT_DEFAULT_INNER_WIDTH, POPOUT_DEFAULT_INNER_HEIGHT);
+    let (default_width, default_height) = chat_window_size_for_visible_content(
+        POPOUT_DEFAULT_INNER_WIDTH,
+        POPOUT_DEFAULT_INNER_HEIGHT,
+    );
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title("Kivio")
         .inner_size(default_width, default_height)

@@ -20,7 +20,9 @@ pub fn is_popout_label(label: &str) -> bool {
 }
 
 pub fn conversation_id_from_label(label: &str) -> Option<&str> {
-    label.strip_prefix(POPOUT_LABEL_PREFIX).filter(|id| !id.is_empty())
+    label
+        .strip_prefix(POPOUT_LABEL_PREFIX)
+        .filter(|id| !id.is_empty())
 }
 
 pub fn popout_label(conversation_id: &str) -> String {
@@ -52,13 +54,15 @@ pub fn has_open_popouts(app: &AppHandle) -> bool {
 }
 
 pub fn first_visible_popout(app: &AppHandle) -> Option<WebviewWindow> {
-    app.webview_windows().into_iter().find_map(|(label, window)| {
-        if is_popout_label(&label) && window.is_visible().ok().unwrap_or(false) {
-            Some(window)
-        } else {
-            None
-        }
-    })
+    app.webview_windows()
+        .into_iter()
+        .find_map(|(label, window)| {
+            if is_popout_label(&label) && window.is_visible().ok().unwrap_or(false) {
+                Some(window)
+            } else {
+                None
+            }
+        })
 }
 
 fn sync_registered_popouts(app: &AppHandle) {
@@ -157,9 +161,7 @@ pub async fn chat_open_conversation_popout(
     }
     let open = list_popout_conversation_ids(&app);
     if open.len() >= MAX_POPOUT_WINDOWS {
-        return Err(format!(
-            "最多同时打开 {MAX_POPOUT_WINDOWS} 个独立对话窗口"
-        ));
+        return Err(format!("最多同时打开 {MAX_POPOUT_WINDOWS} 个独立对话窗口"));
     }
     let window = windows::ensure_chat_popout_window(&app, &label, &conversation_id)?;
     sync_registered_popouts(&app);
