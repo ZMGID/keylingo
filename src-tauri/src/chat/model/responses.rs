@@ -766,6 +766,13 @@ struct ResponsesStreamState {
 }
 
 impl ResponsesStreamState {
+    fn has_usable_output(&self) -> bool {
+        !self.text.trim().is_empty()
+            || !self.reasoning.trim().is_empty()
+            || !self.tool_calls.is_empty()
+            || !self.images.is_empty()
+    }
+
     fn partial_mut(&mut self, item_id: &str) -> Option<&mut ResponsesToolPartial> {
         self.tool_calls
             .iter_mut()
@@ -1116,13 +1123,12 @@ fn handle_responses_stream_event(
             }
         }
         "response.failed" | "error" => {
-            let error_obj = value
-                .get("response")
-                .and_then(|response| response.get("error"))
-                .or_else(|| value.get("error"));
-            let message = error_obj
-                .map(responses_error_message)
-                .unwrap_or_else(|| "Responses stream failed".to_string());
+            let message = responses_stream_error_text(value);
+            // Gemini 等上游常不发 response.completed；中转会在正文已经流完后补一条
+            // 「缺终态」error。有可用输出时当成功收尾，别把已经生成的回答整轮作废。
+            if super::is_missing_stream_terminal_error(&message) && state.has_usable_output() {
+                return Ok(None);
+            }
             return Ok(Some(message));
         }
         _ => {}
@@ -1495,6 +1501,29 @@ fn responses_error_message(error: &Value) -> String {
         return serialized;
     }
     "Unknown Responses API error".to_string()
+}
+
+/// `response.failed` 把原因放在 `response.error`；OpenAI 的 `type: error` 事件把
+/// `message` 放在顶层；部分中转把 `error` 直接写成字符串。三条都要读到，否则缺终态
+/// 的那条文案会变成笼统的 "Responses stream failed"，后面的 salvage 对不上。
+fn responses_stream_error_text(value: &Value) -> String {
+    let nested = value
+        .get("response")
+        .and_then(|response| response.get("error"))
+        .or_else(|| value.get("error"));
+    if let Some(error) = nested {
+        if let Some(text) = error.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            return text.to_string();
+        }
+        return responses_error_message(error);
+    }
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Responses stream failed".to_string())
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -2233,6 +2262,45 @@ mod tests {
         );
         let err = output_from_sse_body(body).expect_err("should error");
         assert!(err.to_string().contains("boom"));
+    }
+
+    /// 中转在正文已经流完后补一条「缺 response.completed」error：token 是真的，当成功收尾。
+    #[test]
+    fn missing_completed_event_after_text_is_success() {
+        let nested = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n",
+            "data: {\"type\":\"error\",\"error\":{\"message\":\"stream ended without terminal event or completed response\"}}\n",
+        );
+        let nested_output = output_from_sse_body(nested).expect("should keep streamed text");
+        assert_eq!(nested_output.text, "你好");
+        assert_eq!(nested_output.finish_reason.as_deref(), Some("stop"));
+
+        let top_level = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n",
+            "data: {\"type\":\"error\",\"message\":\"stream ended without terminal event or completed response\"}\n",
+        );
+        let top_level_output = output_from_sse_body(top_level).expect("top-level error message");
+        assert_eq!(top_level_output.text, "你好");
+
+        let failed = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"stream ended without terminal event or completed response\"}}}\n",
+        );
+        let failed_output = output_from_sse_body(failed).expect("response.failed after text");
+        assert_eq!(failed_output.text, "你好");
+    }
+
+    /// 没有可用输出时，同一条缺终态 error 仍是失败——不能把空流当成成功。
+    #[test]
+    fn missing_completed_event_without_output_is_still_error() {
+        let body = concat!(
+            "data: {\"type\":\"error\",\"message\":\"stream ended without terminal event or completed response\"}\n",
+        );
+        let err = output_from_sse_body(body).expect_err("empty stream should fail");
+        assert!(
+            err.to_string().contains("without terminal"),
+            "got {err}"
+        );
     }
 
     /// A plain JSON body is not mistaken for SSE; the happy path stays unchanged.

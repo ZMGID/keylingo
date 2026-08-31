@@ -157,6 +157,10 @@ const TRANSPORT_PATTERNS: &[&str] = &[
     "dns error",
     "流式响应读取中断",
     "请求超时",
+    "without terminal",
+    "missing terminal",
+    "without finish_reason",
+    "stream ended without",
 ];
 
 /// 判断错误文本是否为「上下文超长」(overflow)。先排除限流/配额误判,再匹配 overflow 文案。
@@ -742,6 +746,7 @@ mod tests {
             "Chat tools planning Error: error sending request for url (https://relay.example/v1/responses) → operation timed out [timeout,request] (attempt 3/3)",
             "Chat tools planning 流式响应读取中断：the provider sent an incomplete or invalid encoded stream chunk。",
             "Chat stream Error: connection reset by peer",
+            "stream ended without terminal event or completed response",
         ] {
             assert_eq!(classify(msg), FailureKind::Timeout, "should be timeout: {msg}");
         }

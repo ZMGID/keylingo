@@ -698,7 +698,33 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
             retry_attempts,
             request,
             &mut sink,
-        ) => result?,
+        ) => match result {
+            Ok(output) => output,
+            Err(err)
+                if crate::chat::model::is_missing_stream_terminal_error(&err.to_string()) =>
+            {
+                let (content, reasoning) = sink.snapshot();
+                if content.trim().is_empty() && reasoning.trim().is_empty() {
+                    return Err(err);
+                }
+                GenerateOutput {
+                    text: content,
+                    reasoning: if reasoning.trim().is_empty() {
+                        None
+                    } else {
+                        Some(reasoning)
+                    },
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    finish_reason: Some("stop".to_string()),
+                    provider_messages: Vec::new(),
+                    cancelled: false,
+                    web_search: None,
+                    images: Vec::new(),
+                }
+            }
+            Err(err) => return Err(err),
+        },
         _ = host.wait_for_generation_inactive(conversation_id, generation) => {
             let (content, reasoning) = sink.snapshot();
             return Ok(ChatStreamOutput::new(

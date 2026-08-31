@@ -233,6 +233,14 @@ impl GeminiProvider<'_> {
                     continue;
                 };
                 if let Some(err) = gemini_error_message(&value) {
+                    if super::is_missing_stream_terminal_error(&err)
+                        && (!full.trim().is_empty()
+                            || !reasoning_full.trim().is_empty()
+                            || !tool_calls.is_empty()
+                            || !images.is_empty())
+                    {
+                        continue;
+                    }
                     sink.emit(StreamPart::Error {
                         message: err.clone(),
                     })?;

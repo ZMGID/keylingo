@@ -180,6 +180,8 @@ function streamErrorDegraded(error: string): DegradedAnswer {
       || normalized.includes('timed out')
       || normalized.includes('连接')
       || normalized.includes('网络')
+      || normalized.includes('without terminal')
+      || normalized.includes('stream ended')
       ? 'timeout'
       : normalized.includes('context') || normalized.includes('上下文')
         ? 'context_overflow'

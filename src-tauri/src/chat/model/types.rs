@@ -509,6 +509,19 @@ pub fn stream_read_error(label: &str, err: &reqwest::Error) -> ModelError {
     )
 }
 
+/// 中转把 Gemini 等上游包成 Responses 时，常在正文已经流完后再发一条
+/// 「缺 `response.completed` / terminal event」的 error。token 是真的，
+/// 当成硬失败会把已经生成的回答整轮作废。
+pub fn is_missing_stream_terminal_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("without terminal")
+        || lower.contains("missing terminal")
+        || lower.contains("without finish_reason")
+        || lower.contains("stream closed before response.completed")
+        || (lower.contains("stream ended")
+            && (lower.contains("completed") || lower.contains("terminal event")))
+}
+
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
@@ -1138,6 +1151,20 @@ mod tests {
 
         assert!(stream_error.is_stream_read_interrupted());
         assert!(!generic_error.is_stream_read_interrupted());
+    }
+
+    #[test]
+    fn missing_stream_terminal_error_matches_relay_wording() {
+        assert!(is_missing_stream_terminal_error(
+            "stream ended without terminal event or completed response"
+        ));
+        assert!(is_missing_stream_terminal_error(
+            "Stream closed before response.completed"
+        ));
+        assert!(!is_missing_stream_terminal_error(
+            "the provider stream ended unexpectedly"
+        ));
+        assert!(!is_missing_stream_terminal_error("rate limited"));
     }
 
     #[test]
