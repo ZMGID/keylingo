@@ -77,7 +77,11 @@ pub fn confine_file_path(base: &Path, raw: &str) -> Result<PathBuf, String> {
     if trimmed.starts_with('~') {
         return Err(ERR.to_string());
     }
-    let path = Path::new(trimmed);
+    // 反斜杠统一按分隔符处理:Unix 的 components() 会把 `..\ssh` 当成单个普通
+    // 文件名放行,而同一份自动化图在 Windows 上它就是真穿越。安全边界要求
+    // 两平台判定一致;字面含反斜杠的文件名不值得为其留口子。
+    let normalized = trimmed.replace('\\', "/");
+    let path = Path::new(&normalized);
     let mut depth = 0i32;
     for component in path.components() {
         match component {
