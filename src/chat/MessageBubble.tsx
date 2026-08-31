@@ -175,7 +175,7 @@ function ArtifactImage({
       conversationId,
     })
   return (
-    <figure className="m-0 w-fit max-w-full">
+    <figure className="m-0 min-w-0 max-w-full shrink-0">
       <ChatInlineImage
         src={src}
         alt={label || name}
@@ -245,7 +245,7 @@ function GeneratedImageArtifacts({
   const total = imageArtifacts.length
 
   return (
-    <div className="mt-3 flex min-w-0 max-w-full flex-wrap gap-2">
+    <div className="mt-3 flex min-w-0 max-w-full flex-wrap content-start gap-2">
       {imageArtifacts.map((artifact, index) => (
         <ArtifactImage
           key={`${artifact.path || artifact.name || 'img'}-${index}`}

@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react'
 import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageContextMenu'
 
 /** 聊天区预览磁贴的最长边。点开查看器仍是原图。 */
-export const CHAT_IMAGE_TILE_MAX_PX = 240
+export const CHAT_IMAGE_TILE_MAX_PX = 128
 
 const IMAGE_CLASS =
   'rounded-md border border-neutral-200/90 bg-white object-contain dark:border-neutral-700 dark:bg-neutral-900'
@@ -70,10 +70,11 @@ export function ChatInlineImage({
       <button
         type="button"
         data-chat-inline-image=""
-        className={`inline-block max-w-full cursor-zoom-in rounded-md p-0 text-left align-top ${className}`}
+        className={`inline-block max-w-full min-w-0 cursor-zoom-in overflow-hidden rounded-md p-0 text-left align-top ${className}`}
         style={{
           aspectRatio: String(ratio),
-          width: `min(100%, ${tileWidthPx(ratio)}px)`,
+          width: tileWidthPx(ratio),
+          maxWidth: '100%',
         }}
         onClick={onOpenViewer}
         onContextMenu={(event) => {
@@ -91,7 +92,7 @@ export function ChatInlineImage({
           alt={alt}
           onLoad={handleLoad}
           loading={src.startsWith('data:') ? undefined : 'lazy'}
-          className={`h-full w-full ${IMAGE_CLASS}`}
+          className={`h-full w-full min-w-0 max-w-full ${IMAGE_CLASS}`}
         />
       </button>
       {menuAnchor ? (

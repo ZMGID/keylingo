@@ -15,23 +15,24 @@ function fireLoad(img: HTMLImageElement, width: number, height: number) {
 }
 
 describe('ChatInlineImage', () => {
-  it('caps the long edge at 240px so tiles can sit in a row', () => {
+  it('caps the long edge at 128px so tiles can sit in a row', () => {
     const { container } = render(<ChatInlineImage src={`${PNG}A`} alt="x" />)
     const button = container.querySelector('button')!
     // 未知比例先按 1:1 占位，避免解码前撑满整行。
     expect(button.style.aspectRatio).toBe('1')
-    expect(button.style.width).toBe('min(100%, 240px)')
+    expect(button.style.width).toBe('128px')
+    expect(button.style.maxWidth).toBe('100%')
 
     fireLoad(container.querySelector('img')!, 1000, 500)
     expect(button.style.aspectRatio).toBe('2')
-    // 横图：宽封顶 240，高 = 120。
-    expect(button.style.width).toBe('min(100%, 240px)')
+    // 横图：宽封顶 128，高 = 64。
+    expect(button.style.width).toBe('128px')
   })
 
   it('caps portrait tiles by height so they stay 240 tall', () => {
     const { container } = render(<ChatInlineImage src={`${PNG}P`} alt="x" />)
     fireLoad(container.querySelector('img')!, 500, 1000)
-    expect(container.querySelector('button')!.style.width).toBe('min(100%, 120px)')
+    expect(container.querySelector('button')!.style.width).toBe('64px')
   })
 
   it('remembers the ratio across unmount so scrolling back does not re-measure', () => {

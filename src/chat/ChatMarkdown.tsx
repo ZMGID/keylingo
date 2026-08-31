@@ -807,7 +807,6 @@ const markdownComponents = {
   a: ({ href, children }) => <LinkAnchor href={typeof href === 'string' ? href : ''}>{children}</LinkAnchor>,
 } as Components
 
-
 function LinkAnchor({
   href,
   children,
@@ -1080,13 +1079,15 @@ function MarkdownArtifactImage({
   if (!src) return null
   const openViewer = () => onImageClick?.(src, alt, rawSrc)
   return (
-    <ChatInlineImage
-      src={src}
-      alt={alt}
-      name={artifact?.name ?? rawSrc}
-      onOpenViewer={openViewer}
-      className="mb-2 mr-2"
-    />
+    <span data-chat-md-image="" className="inline-block max-w-full align-top">
+      <ChatInlineImage
+        src={src}
+        alt={alt}
+        name={artifact?.name ?? rawSrc}
+        onOpenViewer={openViewer}
+        className="mb-2 mr-2"
+      />
+    </span>
   )
 }
 

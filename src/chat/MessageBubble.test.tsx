@@ -866,7 +866,7 @@ describe('MessageBubble explicit artifact presentation', () => {
     const images = container.querySelectorAll('img')
     expect(images).toHaveLength(2)
     expect(images[0]?.closest('.flex-wrap')).not.toBeNull()
-    expect(images[0]?.closest('button')?.style.width).toBe('min(100%, 240px)')
+    expect(images[0]?.closest('button')?.style.width).toBe('128px')
     expect(images[0]?.closest('button')?.className ?? '').not.toContain('h-16')
     expect(screen.getByRole('button', { name: '打开文件 简历.pdf' }).className).toContain('h-16')
     expect(screen.getByRole('button', { name: '打开文件 notes.md' }).className).toContain('h-16')

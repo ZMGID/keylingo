@@ -60,6 +60,7 @@ describe('ChatMarkdown artifact 图片', () => {
     )
     const images = container.querySelectorAll('[data-chat-inline-image]')
     expect(images).toHaveLength(2)
-    expect(images[0]?.getAttribute('style') ?? '').toContain('240px')
+    expect(images[0]?.getAttribute('style') ?? '').toContain('128px')
+    expect(container.querySelectorAll('[data-chat-md-image]')).toHaveLength(2)
   })
 })
