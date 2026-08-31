@@ -756,6 +756,13 @@ html.windows body {
   background: #313134;
 }
 
+/* Markdown 里连续的纯图片段落并排，和产物画廊同一套横排。 */
+.chat-markdown p:has(> [data-chat-inline-image]:only-child) {
+  display: inline-block;
+  vertical-align: top;
+  margin: 0 8px 8px 0;
+}
+
 /* 消息悬停操作/元信息条的显隐。`data-msg-hovered` 由 MessageBubble 的指针逻辑维护
    （enter 置位、document pointermove 兜底清除），这里只负责按属性显隐。
    不走 React state：滚动时消息从光标下滑过会连环触发 enter/leave，

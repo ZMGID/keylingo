@@ -809,4 +809,67 @@ describe('MessageBubble explicit artifact presentation', () => {
 
     expect(screen.getByRole('button', { name: /report\.txt/ })).toBeInTheDocument()
   })
+
+  it('lays presented images out as wrapping tiles and files as compact chips', () => {
+    const message: ChatMessage = {
+      id: 'msg-mixed-artifacts',
+      role: 'assistant',
+      content: '',
+      artifacts: [
+        {
+          id: 'art_img',
+          name: 'shot.jpg',
+          mime_type: 'image/jpeg',
+          data_url: 'data:image/jpeg;base64,/9j/4AAQ',
+        },
+        {
+          id: 'art_img2',
+          name: 'shot-2.jpg',
+          mime_type: 'image/jpeg',
+          data_url: 'data:image/jpeg;base64,/9j/4AAQ',
+        },
+        {
+          id: 'art_pdf',
+          name: '简历.pdf',
+          mime_type: 'application/pdf',
+          data_url: 'data:application/pdf;base64,JVBERi0xLjc=',
+          path: '/tmp/简历.pdf',
+        },
+        {
+          id: 'art_md',
+          name: 'notes.md',
+          mime_type: 'text/markdown',
+          data_url: 'data:text/markdown;base64,YQ==',
+          path: '/tmp/notes.md',
+        },
+      ],
+      segments: [
+        { id: 'present', kind: 'tool', phase: 'tool_loop', order: 1, tool_call_id: 'call-present' },
+      ],
+      tool_calls: [
+        {
+          id: 'call-present',
+          name: 'present_artifacts',
+          source: 'native',
+          status: 'completed',
+          structured_content: {
+            type: 'artifact_presentation',
+            artifactIds: ['art_img', 'art_img2', 'art_pdf', 'art_md'],
+          },
+        },
+      ],
+      timestamp: 1,
+    }
+
+    const { container } = render(<MessageBubble message={message} />)
+
+    const images = container.querySelectorAll('img')
+    expect(images).toHaveLength(2)
+    expect(images[0]?.closest('.flex-wrap')).not.toBeNull()
+    expect(images[0]?.closest('button')?.style.width).toBe('min(100%, 240px)')
+    expect(images[0]?.closest('button')?.className ?? '').not.toContain('h-16')
+    expect(screen.getByRole('button', { name: '打开文件 简历.pdf' }).className).toContain('h-16')
+    expect(screen.getByRole('button', { name: '打开文件 notes.md' }).className).toContain('h-16')
+    expect(container.textContent).not.toContain('%PDF')
+  })
 })

@@ -18,6 +18,16 @@ pub(crate) async fn read_image_as_tool_result(
     vision::read_image_as_tool_result(app, settings, conversation_id, message_id, path).await
 }
 
+pub(crate) async fn read_images_as_tool_result(
+    app: &AppHandle,
+    settings: &Settings,
+    conversation_id: &str,
+    message_id: &str,
+    paths: &[std::path::PathBuf],
+) -> Result<mcp::types::McpToolCallResult, String> {
+    vision::read_images_as_tool_result(app, settings, conversation_id, message_id, paths).await
+}
+
 /// R1：MCP 工具结果里的图片 artifact「直达模型」。通用于所有 MCP server（非
 /// officecli 专属），复用 `read_image_as_tool_result` 已验证的两级策略：
 /// ① 主模型支持视觉 → 把图片作为 follow-up user 消息直喂（`data_url_image_part`，

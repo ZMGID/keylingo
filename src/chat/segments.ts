@@ -2,6 +2,7 @@ import type { ChatMessageSegment, ToolCallRecord } from './types'
 import { foldToolName, hasAskUserStructuredContent, isAskUserToolName } from './askUserTools'
 import { normalizeToolCallStatus } from './toolStatus'
 import { isArtifactPresentationToolCall } from './artifactPresentation'
+import { isImageArtifact } from './artifacts'
 
 export function segmentToolCallId(segment: ChatMessageSegment): string {
   return segment.tool_call_id ?? segment.toolCallId ?? ''
@@ -244,6 +245,115 @@ export function isStandaloneToolCard(toolCall: ToolCallRecord): boolean {
   if (isExternalSubagentToolCall(toolCall)) return true
   if (toolCall.source !== 'native') return false
   return name === 'agent' || name === 'advisor' || isArtifactPresentationToolCall(toolCall)
+}
+
+const IMAGE_READ_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i
+
+function toolCallArgObject(toolCall: ToolCallRecord): Record<string, unknown> | null {
+  const raw = toolCall.arguments ?? toolCall.args ?? toolCall.input
+  if (!raw) return null
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function toolCallPathList(toolCall: ToolCallRecord): string[] {
+  const args = toolCallArgObject(toolCall)
+  const paths: string[] = []
+  const extra = args?.paths
+  if (Array.isArray(extra)) {
+    for (const item of extra) {
+      if (typeof item === 'string' && item.trim()) paths.push(item.trim())
+    }
+  }
+  const path = args?.path ?? args?.file_path ?? args?.filePath
+  if (typeof path === 'string' && path.trim() && !paths.includes(path.trim())) {
+    paths.unshift(path.trim())
+  }
+  return paths
+}
+
+function pathBasename(path: string): string {
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return slash >= 0 ? path.slice(slash + 1) : path
+}
+
+/** `read` 正在看图片：结果带 image_read / 图片 artifact，或参数路径是图片。 */
+export function isImageReadToolCall(toolCall: ToolCallRecord): boolean {
+  const folded = foldToolName(canonicalToolName(toolCall))
+  if (folded !== 'read' && folded !== 'readfile') return false
+  const structured = toolCall.structured_content ?? toolCall.structuredContent
+  if (structured && typeof structured === 'object' && (structured as { type?: unknown }).type === 'image_read') {
+    return true
+  }
+  if ((toolCall.artifacts ?? []).some(isImageArtifact)) return true
+  return toolCallPathList(toolCall).some((path) => IMAGE_READ_EXT.test(path))
+}
+
+export type ImageReadItem = {
+  path: string
+  name: string
+  dataUrl: string
+}
+
+export function imageReadItems(toolCall: ToolCallRecord): ImageReadItem[] {
+  const fromArtifacts = (toolCall.artifacts ?? []).filter(isImageArtifact).map((artifact) => {
+    const path = artifact.path ?? artifact.filePath ?? artifact.localPath ?? ''
+    return {
+      path,
+      name: artifact.name || pathBasename(path) || 'image',
+      dataUrl: artifact.dataUrl ?? artifact.data_url ?? '',
+    }
+  })
+  if (fromArtifacts.length > 0) return fromArtifacts
+  return toolCallPathList(toolCall)
+    .filter((path) => IMAGE_READ_EXT.test(path))
+    .map((path) => ({ path, name: pathBasename(path) || 'image', dataUrl: '' }))
+}
+
+export function imageReadCount(toolCall: ToolCallRecord): number {
+  const items = imageReadItems(toolCall)
+  if (items.length > 0) return items.length
+  const structured = toolCall.structured_content ?? toolCall.structuredContent
+  if (structured && typeof structured === 'object') {
+    const count = (structured as { count?: unknown }).count
+    if (typeof count === 'number' && count > 0) return count
+  }
+  return 1
+}
+
+export type ToolDisplayCluster =
+  | { type: 'imageRead'; toolCalls: ToolCallRecord[] }
+  | { type: 'tool'; toolCall: ToolCallRecord }
+
+/** 连续的读图调用收成一组，好画成一行缩略图。 */
+export function clusterToolCallsForDisplay(toolCalls: ToolCallRecord[]): ToolDisplayCluster[] {
+  const items: ToolDisplayCluster[] = []
+  let cluster: ToolCallRecord[] | null = null
+  const flush = () => {
+    if (cluster?.length) items.push({ type: 'imageRead', toolCalls: cluster })
+    cluster = null
+  }
+  for (const toolCall of toolCalls) {
+    if (isImageReadToolCall(toolCall)) {
+      if (!cluster) cluster = []
+      cluster.push(toolCall)
+      continue
+    }
+    flush()
+    items.push({ type: 'tool', toolCall })
+  }
+  flush()
+  return items
 }
 
 /** tool record 的唯一 id（兼容多种字段命名）。 */

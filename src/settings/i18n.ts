@@ -1462,6 +1462,8 @@ export const i18n = {
     chatPreviewImage: '预览图片',
     chatRemoveAttachment: '移除',
     chatImagePreviewFailed: '图片无法预览',
+    chatViewedImages: '已查看 {n} 张图像',
+    chatViewingImages: '正在查看 {n} 张图像',
     chatEnterProject: '进入项目工作',
     chatAdditionalDirectories: '附加目录',
     chatAdditionalDirectoriesHint: '主目录之外，这条对话可以读写的文件夹。相对路径仍落在项目主目录。',
@@ -3392,6 +3394,8 @@ export const i18n = {
     chatPreviewImage: 'Preview image',
     chatRemoveAttachment: 'Remove',
     chatImagePreviewFailed: 'Unable to preview image',
+    chatViewedImages: 'Viewed {n} images',
+    chatViewingImages: 'Viewing {n} images',
     chatEnterProject: 'Enter project',
     chatAdditionalDirectories: 'Additional directories',
     chatAdditionalDirectoriesHint:

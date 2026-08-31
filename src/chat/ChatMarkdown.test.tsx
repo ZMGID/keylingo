@@ -47,4 +47,19 @@ describe('ChatMarkdown artifact 图片', () => {
 
     expect(container.querySelector('img')).toHaveAttribute('src', 'data:image/png;base64,AAAA')
   })
+
+  it('renders consecutive markdown images as inline tiles', () => {
+    const { container } = render(
+      <ChatMarkdown
+        content={'![a](one.png)\n\n![b](two.png)'}
+        artifacts={[
+          { name: 'one.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,AAAA' },
+          { name: 'two.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,BBBB' },
+        ]}
+      />,
+    )
+    const images = container.querySelectorAll('[data-chat-inline-image]')
+    expect(images).toHaveLength(2)
+    expect(images[0]?.getAttribute('style') ?? '').toContain('240px')
+  })
 })

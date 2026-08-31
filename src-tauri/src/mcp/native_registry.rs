@@ -465,11 +465,53 @@ pub fn text_tool_result(content: String) -> McpToolCallResult {
 
 fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     Box::pin(async move {
-        let raw_path = ctx
+        let extra_paths = string_list_argument(ctx.arguments, "paths")?;
+        let single_path = ctx
             .arguments
             .get("path")
             .and_then(|value| value.as_str())
-            .unwrap_or_default();
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let mut requested = extra_paths;
+        if let Some(path) = single_path.clone() {
+            if !requested.iter().any(|existing| existing == &path) {
+                requested.insert(0, path);
+            }
+        }
+
+        let mut image_paths = Vec::new();
+        let mut non_image = false;
+        for raw in &requested {
+            let Ok(path) = crate::native_tools::resolve_tool_read_path(ctx.workspace, raw) else {
+                continue;
+            };
+            if path.is_file() && crate::chat::knowledge_base::process::is_image_ext(&path) {
+                image_paths.push(path);
+            } else {
+                non_image = true;
+            }
+        }
+        if !image_paths.is_empty() && (requested.len() > 1 || !non_image) {
+            if non_image {
+                return Ok(text_tool_result(
+                    "paths 只能用来读图片。文本文件请用 path 单独 read。".to_string(),
+                ));
+            }
+            if let Some(nc) = ctx.native_ctx {
+                return crate::chat::commands::read_images_as_tool_result(
+                    ctx.app,
+                    ctx.settings,
+                    &nc.conversation_id,
+                    &nc.message_id,
+                    &image_paths,
+                )
+                .await;
+            }
+        }
+
+        let raw_path = single_path.as_deref().unwrap_or_default();
         if let Ok(path) = crate::native_tools::resolve_tool_read_path(ctx.workspace, raw_path) {
             // 目录 → 列目录（并入原 ls 工具）。offset/limit 对目录忽略，走 list_dir 默认。
             if path.is_dir() {
@@ -492,6 +534,9 @@ fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
                 // PDF / Word / Excel 等二进制文档：read 不解析，引导走对应 skill。
                 return Ok(text_tool_result(hint));
             }
+        }
+        if raw_path.is_empty() {
+            return Err("read requires path or paths".to_string());
         }
         // 文本文件（及无法预解析为图片/文档的路径）→ 原同步文本读取。
         let result = crate::native_tools::read_file(ctx.workspace, ctx.arguments)?;
@@ -970,7 +1015,7 @@ fn string_list_argument(arguments: &Value, name: &str) -> Result<Vec<String>, St
     };
     let values = values
         .as_array()
-        .ok_or_else(|| format!("present_artifacts {name} must be an array"))?;
+        .ok_or_else(|| format!("{name} must be an array"))?;
     let mut items = Vec::new();
     for value in values {
         let Some(item) = value

@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   CheckCircle2,
+  ChevronDown,
   CircleSlash,
   Copy,
   Download,
@@ -16,6 +17,7 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  ImageOff,
   ImagePlus,
   ListChecks,
   Loader2,
@@ -35,7 +37,7 @@ import type { AgentTodoItem, AgentTodoState, AgentTodoStatus, ToolCallRecord, To
 import { normalizeToolCallStatus } from './toolStatus'
 import { formatToolResultPreview } from './toolResultPreview'
 import { hasAskUserStructuredContent, isAskUserToolName } from './askUserTools'
-import { canonicalToolName, isExternalSubagentToolCall, toolCallDiffStats, toolRecordRawName } from './segments'
+import { canonicalToolName, isExternalSubagentToolCall, isImageReadToolCall, imageReadCount, imageReadItems, toolCallDiffStats, toolRecordRawName } from './segments'
 import { requestDockDiffPreview, requestDockPreview } from './dock/dockPreview'
 import { DiffView } from './dock/DiffView'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
@@ -46,6 +48,9 @@ import { WebSearchIcon } from '../settings/NavIcons'
 import { api } from '../api/tauri'
 import { useT } from '../settings/i18n'
 import { setHash } from './chatRoutes'
+import { loadAttachmentDataUrl } from './attachmentPreview'
+import { openChatImageViewer } from './imageViewer'
+import type { ImageReadItem } from './segments'
 
 export interface ToolCallBlockProps {
   toolCall: ToolCallRecord
@@ -1930,9 +1935,137 @@ function DefaultToolCallBlock({
   )
 }
 
+function collectImageReadItems(toolCalls: ToolCallRecord[]): ImageReadItem[] {
+  const seen = new Set<string>()
+  const items: ImageReadItem[] = []
+  for (const toolCall of toolCalls) {
+    for (const item of imageReadItems(toolCall)) {
+      const key = item.path || item.name
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      items.push(item)
+    }
+  }
+  return items
+}
+
+function ImageReadThumb({ item }: { item: ImageReadItem }) {
+  const t = useT()
+  const [src, setSrc] = useState<string | null>(item.dataUrl || null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (item.dataUrl) {
+      setSrc(item.dataUrl)
+      setFailed(false)
+      return
+    }
+    if (!item.path) {
+      setFailed(true)
+      return
+    }
+    let cancelled = false
+    setSrc(null)
+    setFailed(false)
+    void loadAttachmentDataUrl({ type: 'image', path: item.path, name: item.name }, null).then((dataUrl) => {
+      if (cancelled) return
+      if (dataUrl) setSrc(dataUrl)
+      else setFailed(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [item.dataUrl, item.path, item.name])
+
+  if (failed) {
+    return (
+      <div
+        className="flex h-16 w-16 items-center justify-center rounded-lg bg-neutral-100 text-neutral-400 dark:bg-neutral-800"
+        title={item.name}
+      >
+        <ImageOff size={16} strokeWidth={1.8} />
+        <span className="sr-only">{t.chatImagePreviewFailed}</span>
+      </div>
+    )
+  }
+
+  if (!src) {
+    return <div className="kv-skeleton h-16 w-16 rounded-lg" aria-hidden="true" />
+  }
+
+  return (
+    <button
+      type="button"
+      className="h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-neutral-100 p-0 dark:bg-neutral-800"
+      title={item.name}
+      aria-label={t.chatPreviewImage}
+      onClick={() => openChatImageViewer({
+        src,
+        alt: item.name,
+        name: item.name,
+        path: item.path || null,
+        conversationId: null,
+      })}
+    >
+      <img src={src} alt="" className="h-full w-full object-cover" loading="lazy" />
+    </button>
+  )
+}
+
+export function ImageReadCluster({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  const items = useMemo(() => collectImageReadItems(toolCalls), [toolCalls])
+  const count = Math.max(
+    items.length,
+    toolCalls.reduce((total, toolCall) => total + imageReadCount(toolCall), 0),
+  )
+  const running = toolCalls.some((toolCall) => normalizeToolCallStatus(toolCall.status) === 'running')
+  const label = (running ? t.chatViewingImages : t.chatViewedImages).replace('{n}', String(Math.max(1, count)))
+
+  return (
+    <div className="not-prose mb-1 text-[12.5px] leading-5 text-neutral-500 dark:text-neutral-400">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="max-w-full min-w-0 inline-flex items-center gap-1.5 rounded-md py-0 text-[11.5px] text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+      >
+        <Eye
+          className="shrink-0 text-neutral-400 dark:text-neutral-500"
+          size={14}
+          strokeWidth={1.9}
+        />
+        <span
+          className={`shrink-0 font-medium text-neutral-700 dark:text-neutral-200${
+            running ? ' chat-motion-tool-shimmer' : ''
+          }`}
+        >
+          {label}
+        </span>
+        <ChevronDown
+          className={`shrink-0 text-neutral-400 transition-transform dark:text-neutral-500 ${open ? '' : '-rotate-90'}`}
+          size={12}
+          strokeWidth={2}
+        />
+      </button>
+      {open && items.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {items.map((item, index) => (
+            <ImageReadThumb key={item.path || `${item.name}-${index}`} item={item} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ToolCallBlockComponent(props: ToolCallBlockProps) {
   if (isAskUserTool(props.toolCall)) {
     return <AskUserBlock toolCall={props.toolCall} />
+  }
+  if (isImageReadToolCall(props.toolCall)) {
+    return <ImageReadCluster toolCalls={[props.toolCall]} />
   }
   if (isSubAgentRecord(props.toolCall)) {
     return <SubAgentCard {...props} />

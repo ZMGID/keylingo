@@ -274,7 +274,7 @@ pub fn native_read_file_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__read_file".to_string(),
         name: "read".to_string(),
-        description: "Read a local file or directory. For a file: text is line-numbered as `N<TAB>line` for easy reference; the numbers are display-only and are NOT part of the file — never include them in edit old_string. Output is capped at 2000 lines or 50KB, whichever is hit first, so a single read can never flood the context; when the cap or your own limit stops the read early the result says so and reports total_lines and next_offset — continue with offset until you have what you need. Optional offset/limit select a 1-based line window (the cap still applies on top). For a directory path: returns its entries (folded in the former `ls` tool); offset/limit are ignored. Image files (png/jpg/webp/…) are also supported: the image is shown to you directly when your model has vision, otherwise it is described or OCR'd to text — so you can `read` screenshots and photos by path. For PDF/Word/Excel, use the matching skill instead.".to_string(),
+        description: "Read a local file or directory. For a file: text is line-numbered as `N<TAB>line` for easy reference; the numbers are display-only and are NOT part of the file — never include them in edit old_string. Output is capped at 2000 lines or 50KB, whichever is hit first, so a single read can never flood the context; when the cap or your own limit stops the read early the result says so and reports total_lines and next_offset — continue with offset until you have what you need. Optional offset/limit select a 1-based line window (the cap still applies on top). For a directory path: returns its entries (folded in the former `ls` tool); offset/limit are ignored. Image files (png/jpg/webp/…) are also supported: the image is shown to you directly when your model has vision, otherwise it is described or OCR'd to text — so you can `read` screenshots and photos by path. To inspect several images at once, pass `paths` (up to 8) instead of issuing multiple read calls. For PDF/Word/Excel, use the matching skill instead.".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -282,10 +282,16 @@ pub fn native_read_file_tool() -> ChatToolDefinition {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "File path to read. Relative paths resolve from the project root/current workspace; absolute and ~/ paths are also accepted when allowed by workspace mode." },
+                "paths": {
+                    "type": "array",
+                    "description": "Several image files to inspect in one call (png/jpg/webp/gif, max 8). Prefer this over multiple read calls when looking at a set of photos. Do not use this for text files.",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "maxItems": 8
+                },
                 "offset": { "type": "integer", "description": "1-based start line (optional)" },
                 "limit": { "type": "integer", "description": "Max lines to return (optional)" }
-            },
-            "required": ["path"]
+            }
         }),
         sensitive: false,
         annotations: None,
@@ -1149,6 +1155,8 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("File path"));
+        assert!(read_schema["properties"].get("paths").is_some());
+        assert!(read_schema.get("required").is_none());
         // read 现在也列目录，描述里应提到目录
         assert!(native_read_file_tool().description.contains("directory"));
         assert!(grep.description.contains("file or under a directory"));

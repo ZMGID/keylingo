@@ -37,7 +37,9 @@ pub(crate) mod reasoning;
 use reasoning::resolve_thinking;
 
 mod vision_compat;
-pub(crate) use vision_compat::{attach_image_artifacts_for_model, read_image_as_tool_result};
+pub(crate) use vision_compat::{
+    attach_image_artifacts_for_model, read_image_as_tool_result, read_images_as_tool_result,
+};
 
 mod reply;
 use reply::{agent_run_entry_label, complete_assistant_reply, complete_assistant_reply_inner};

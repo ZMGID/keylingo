@@ -251,6 +251,35 @@ pub(super) async fn analyze_chat_images_with_auxiliary_model(
     })
 }
 
+const MAX_READ_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_READ_IMAGES: usize = 8;
+
+fn image_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image")
+        .to_string()
+}
+
+fn image_read_artifact(path: &Path) -> mcp::types::ChatToolArtifact {
+    let size_bytes = fs::metadata(path).ok().map(|meta| meta.len());
+    mcp::types::ChatToolArtifact {
+        id: None,
+        name: image_file_name(path),
+        mime_type: image_mime_for_path(path).to_string(),
+        data_url: String::new(),
+        size_bytes,
+        path: Some(path.display().to_string()),
+    }
+}
+
+fn image_read_structured(count: usize) -> Value {
+    serde_json::json!({
+        "type": "image_read",
+        "count": count,
+    })
+}
+
 /// `read` 工具读到图片文件时的三级策略，复用对话级图片附件那套现成实现：
 /// ① 主模型支持视觉 → 直喂原图（作为 follow-up user 消息，因为工具结果本身只能
 /// 回文本）；② 纯文本主模型 → 辅助视觉模型出客观文字描述；③ 兜底 → OCR。
@@ -262,44 +291,99 @@ pub(super) async fn read_image_as_tool_result(
     message_id: &str,
     path: &Path,
 ) -> Result<mcp::types::McpToolCallResult, String> {
+    read_images_as_tool_result(
+        app,
+        settings,
+        conversation_id,
+        message_id,
+        std::slice::from_ref(&path.to_path_buf()),
+    )
+    .await
+}
+
+pub(super) async fn read_images_as_tool_result(
+    app: &AppHandle,
+    settings: &Settings,
+    conversation_id: &str,
+    message_id: &str,
+    paths: &[PathBuf],
+) -> Result<mcp::types::McpToolCallResult, String> {
     use crate::mcp::native_registry::text_tool_result;
-    // 直传 base64 不压缩；超大图片会撑爆上下文，故设上限兜底。
-    // ponytail: 不压缩直传，12MB 上限兜底；上下文吃紧再加 resize helper。
-    const MAX_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
 
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("image")
-        .to_string();
+    if paths.is_empty() {
+        return Ok(text_tool_result("没有要读取的图片。".to_string()));
+    }
+    if paths.len() > MAX_READ_IMAGES {
+        return Ok(text_tool_result(format!(
+            "一次最多读取 {MAX_READ_IMAGES} 张图片，本次传了 {} 张。",
+            paths.len()
+        )));
+    }
 
-    if let Ok(meta) = fs::metadata(path) {
-        if meta.len() > MAX_IMAGE_BYTES {
-            return Ok(text_tool_result(format!(
-                "图片 {name} 过大（{} 字节，上限 {MAX_IMAGE_BYTES} 字节），未读取。请压缩后重试。",
-                meta.len()
-            )));
+    let mut accepted = Vec::new();
+    let mut notes = Vec::new();
+    for path in paths {
+        let name = image_file_name(path);
+        match fs::metadata(path) {
+            Ok(meta) if meta.len() > MAX_READ_IMAGE_BYTES => {
+                notes.push(format!(
+                    "图片 {name} 过大（{} 字节，上限 {MAX_READ_IMAGE_BYTES} 字节），未读取。",
+                    meta.len()
+                ));
+            }
+            Ok(_) => accepted.push(path.clone()),
+            Err(err) => notes.push(format!("图片 {name} 无法读取（{err}）。")),
         }
     }
+    if accepted.is_empty() {
+        return Ok(text_tool_result(notes.join("\n")));
+    }
+
+    let artifacts: Vec<mcp::types::ChatToolArtifact> =
+        accepted.iter().map(|path| image_read_artifact(path)).collect();
+    let structured = image_read_structured(artifacts.len());
+    let names = artifacts
+        .iter()
+        .map(|artifact| artifact.name.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
 
     let state = app.state::<AppState>();
     let conversation = load_conversation(app, conversation_id)?;
     let provider = settings.get_provider(&conversation.provider_id);
     let model = conversation.model.as_str();
-    let path_buf = path.to_path_buf();
+
+    let with_notes = |mut content: String| {
+        if !notes.is_empty() {
+            content.push_str("\n\n");
+            content.push_str(&notes.join("\n"));
+        }
+        content
+    };
 
     // ① 主模型支持视觉 → 直喂原图。工具结果只能回文本，所以真正的图片作为紧随
     // 其后的一条 user 消息追加（rounds::push_tool_execution_result 负责排在 tool
     // 结果之后；Anthropic 侧会与 tool_result 合并进同一 user turn）。
     if model_supports_vision(provider, model) == Some(true) {
-        let part = image_content_part(&path_buf)?;
-        let follow_up = serde_json::json!({ "role": "user", "content": [part] });
+        let mut parts = Vec::new();
+        for path in &accepted {
+            parts.push(image_content_part(path)?);
+        }
+        let follow_up = serde_json::json!({ "role": "user", "content": parts });
+        let content = if accepted.len() == 1 {
+            format!("已读取图片 {names}，已作为图片直接提供给你查看（见下一条消息）。")
+        } else {
+            format!(
+                "已读取 {} 张图片（{names}），已作为图片直接提供给你查看（见下一条消息）。",
+                accepted.len()
+            )
+        };
         return Ok(mcp::types::McpToolCallResult {
-            content: format!("已读取图片 {name}，已作为图片直接提供给你查看（见下一条消息）。"),
+            content: with_notes(content),
             is_error: false,
-            raw: Value::Null,
-            artifacts: Vec::new(),
-            structured_content: None,
+            raw: structured.clone(),
+            artifacts,
+            structured_content: Some(structured),
             follow_up_user_messages: vec![follow_up],
         });
     }
@@ -309,7 +393,7 @@ pub(super) async fn read_image_as_tool_result(
         settings,
         provider,
         model,
-        std::slice::from_ref(&path_buf),
+        &accepted,
         Some(session_model_for_conversation(&conversation)),
     ) {
         let language = crate::settings::resolve_chat_language(settings);
@@ -325,35 +409,51 @@ pub(super) async fn read_image_as_tool_result(
             conversation_id,
             message_id,
             last_user_question(&conversation),
-            std::slice::from_ref(&path_buf),
+            &accepted,
             retry_attempts,
             &language,
         )
         .await
         {
-            return Ok(text_tool_result(format!(
-                "图片 {name} 的视觉分析（{} / {}）：\n\n{}",
-                result.provider_name, result.model, result.content
-            )));
+            return Ok(mcp::types::McpToolCallResult {
+                content: with_notes(format!(
+                    "图片 {names} 的视觉分析（{} / {}）：\n\n{}",
+                    result.provider_name, result.model, result.content
+                )),
+                is_error: false,
+                raw: structured.clone(),
+                artifacts,
+                structured_content: Some(structured),
+                follow_up_user_messages: Vec::new(),
+            });
         }
     }
 
     // ③ 兜底 OCR。
-    match crate::chat::knowledge_base::process::process_document(
-        state.inner(),
-        &settings.document_processing,
-        path,
-    )
-    .await
-    {
-        Ok(doc) => Ok(text_tool_result(format!(
-            "图片 {name} 的 OCR 文本：\n\n{}",
-            doc.text
-        ))),
-        Err(err) => Ok(text_tool_result(format!(
-            "图片 {name}：当前模型不支持视觉，且无可用视觉模型，OCR 也未成功（{err}）。如需识别请在设置启用视觉模型或 OCR 引擎。"
-        ))),
+    let mut ocr_chunks = Vec::new();
+    for path in &accepted {
+        let name = image_file_name(path);
+        match crate::chat::knowledge_base::process::process_document(
+            state.inner(),
+            &settings.document_processing,
+            path,
+        )
+        .await
+        {
+            Ok(doc) => ocr_chunks.push(format!("图片 {name} 的 OCR 文本：\n\n{}", doc.text)),
+            Err(err) => ocr_chunks.push(format!(
+                "图片 {name}：当前模型不支持视觉，且无可用视觉模型，OCR 也未成功（{err}）。如需识别请在设置启用视觉模型或 OCR 引擎。"
+            )),
+        }
     }
+    Ok(mcp::types::McpToolCallResult {
+        content: with_notes(ocr_chunks.join("\n\n")),
+        is_error: false,
+        raw: structured.clone(),
+        artifacts,
+        structured_content: Some(structured),
+        follow_up_user_messages: Vec::new(),
+    })
 }
 
 /// R1：MCP 工具结果里的图片 artifact「直达模型」。通用于所有 MCP server（非

@@ -1085,7 +1085,7 @@ function MarkdownArtifactImage({
       alt={alt}
       name={artifact?.name ?? rawSrc}
       onOpenViewer={openViewer}
-      className="my-3"
+      className="mb-2 mr-2"
     />
   )
 }

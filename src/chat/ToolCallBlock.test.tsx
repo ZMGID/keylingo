@@ -16,6 +16,12 @@ vi.mock('../api/tauri', () => ({
   isTauriRuntime: () => true,
 }))
 
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg'
+vi.mock('./attachmentPreview', () => ({
+  loadAttachmentDataUrl: () => Promise.resolve(PNG),
+  openAttachment: () => Promise.resolve(),
+}))
+
 import { ToolCallBlock } from './ToolCallBlock'
 import type { ToolCallRecord } from './types'
 
@@ -878,5 +884,29 @@ describe('ToolCallBlock', () => {
     const button = screen.getByRole('button')
     expect(within(button).getByText('Grep')).toBeInTheDocument()
     expect(within(button).getByText('usage_parts_all_zero')).toBeInTheDocument()
+  })
+
+  it('shows a collapsible thumbnail row for image reads', async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'read',
+          arguments: { paths: ['/tmp/a.png', '/tmp/b.jpg'] },
+          structured_content: { type: 'image_read', count: 2 },
+          artifacts: [
+            { name: 'a.png', path: '/tmp/a.png', mime_type: 'image/png', data_url: '' },
+            { name: 'b.jpg', path: '/tmp/b.jpg', mime_type: 'image/jpeg', data_url: '' },
+          ],
+        })}
+      />,
+    )
+    const header = screen.getByRole('button', { name: /已查看 2 张图像/ })
+    expect(header).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: '预览图片' })).not.toBeInTheDocument()
+
+    await user.click(header)
+    expect(header).toHaveAttribute('aria-expanded', 'true')
+    expect(await screen.findAllByRole('button', { name: '预览图片' })).toHaveLength(2)
   })
 })

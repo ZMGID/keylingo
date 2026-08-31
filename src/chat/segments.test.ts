@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatMessageSegment, ToolCallRecord } from './types'
 import {
+  clusterToolCallsForDisplay,
   compareTimelineSegments,
   formatWorkDuration,
   groupTimelineSegments,
   groupWorkDurationMs,
+  imageReadCount,
+  isImageReadToolCall,
   isStandaloneToolCard,
   isUserFollowUpToolCall,
   isUserSteerToolCall,
@@ -89,6 +92,22 @@ describe('groupTimelineSegments', () => {
     )
 
     expect(items.map((item) => item.type)).toEqual(['group', 'standaloneTool', 'group'])
+  })
+
+  it('keeps image reads inside the process group so they do not split Worked', () => {
+    const items = groupTimelineSegments([
+      toolSegment('bash-segment', 1, 'bash-1'),
+      toolSegment('img-1', 2, 'read-1'),
+      toolSegment('img-2', 3, 'read-2'),
+      toolSegment('write-segment', 4, 'write-1'),
+    ])
+    expect(items.map((item) => item.type)).toEqual(['group'])
+    expect(items[0].type === 'group' && items[0].segments.map((segment) => segment.id)).toEqual([
+      'bash-segment',
+      'img-1',
+      'img-2',
+      'write-segment',
+    ])
   })
 
   // 问用户那块记的是「问了什么 + 你选了什么」—— 折进「调用 N 次工具」里等于把一次
@@ -528,5 +547,46 @@ describe('groupWorkDurationMs', () => {
     const segments = [toolSegment('t1', 1, 'c1')]
     expect(groupWorkDurationMs(segments, [tool({ id: 'c1', name: 'read' })], undefined, 4500)).toBe(4500)
     expect(groupWorkDurationMs(segments, [tool({ id: 'c1', name: 'read' })])).toBeNull()
+  })
+})
+
+describe('image reads', () => {
+  it('recognizes image reads from structured content, artifacts, and paths', () => {
+    expect(isImageReadToolCall(tool({
+      id: 'a',
+      name: 'read',
+      structured_content: { type: 'image_read', count: 2 },
+    }))).toBe(true)
+    expect(isImageReadToolCall(tool({
+      id: 'b',
+      name: 'read',
+      arguments: { path: 'shot.png' },
+    }))).toBe(true)
+    expect(isImageReadToolCall(tool({
+      id: 'c',
+      name: 'read',
+      arguments: { paths: ['a.jpg', 'b.webp'] },
+    }))).toBe(true)
+    expect(isImageReadToolCall(tool({
+      id: 'd',
+      name: 'read',
+      arguments: { path: 'src/App.tsx' },
+    }))).toBe(false)
+    expect(imageReadCount(tool({
+      id: 'e',
+      name: 'read',
+      arguments: { paths: ['a.png', 'b.png'] },
+    }))).toBe(2)
+  })
+
+  it('clusters consecutive image reads for display', () => {
+    const clustered = clusterToolCallsForDisplay([
+      tool({ id: '1', name: 'read', arguments: { path: 'a.png' } }),
+      tool({ id: '2', name: 'read', arguments: { paths: ['b.jpg', 'c.webp'] } }),
+      tool({ id: '3', name: 'bash' }),
+      tool({ id: '4', name: 'read', arguments: { path: 'd.gif' } }),
+    ])
+    expect(clustered.map((item) => item.type)).toEqual(['imageRead', 'tool', 'imageRead'])
+    expect(clustered[0].type === 'imageRead' && clustered[0].toolCalls.map((call) => call.id)).toEqual(['1', '2'])
   })
 })
