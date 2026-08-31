@@ -76,7 +76,11 @@ pub(crate) fn get_default_prompt_templates() -> serde_json::Value {
         "en": default_chat_system_prompt(false)
       },
       // Chat has no built-in identity essay; empty preview matches runtime.
-      "chatRuntimePrompt": crate::chat::plan::chat_runtime_prompt()
+      "chatRuntimePrompt": crate::chat::plan::chat_runtime_prompt(),
+      "promptOptimizePrompts": {
+        "zh": crate::chat::commands::prompt_optimize::default_system_prompt("zh"),
+        "en": crate::chat::commands::prompt_optimize::default_system_prompt("en")
+      }
     })
 }
 

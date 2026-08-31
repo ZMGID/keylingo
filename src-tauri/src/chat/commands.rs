@@ -18,6 +18,8 @@ pub(crate) mod interaction;
 
 pub(crate) mod title;
 
+pub(crate) mod prompt_optimize;
+
 mod tooling;
 
 mod messages;

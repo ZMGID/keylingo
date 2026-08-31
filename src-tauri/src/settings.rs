@@ -747,6 +747,9 @@ pub struct ChatConfig {
     /// 自定义 system prompt；空则使用内置 Chat 模板（Kivio Agent 运行时）。
     #[serde(default)]
     pub system_prompt: String,
+    /// 输入框「问题优化」的自定义系统提示词；空则使用内置优化提示词。
+    #[serde(default)]
+    pub prompt_optimize_prompt: String,
     /// Chat 侧栏显示的用户名；空则前端使用默认文案。
     #[serde(default)]
     pub user_display_name: String,
@@ -803,6 +806,7 @@ impl Default for ChatConfig {
             max_output_tokens: default_chat_max_output_tokens(),
             default_language: String::new(),
             system_prompt: String::new(),
+            prompt_optimize_prompt: String::new(),
             user_display_name: String::new(),
             user_avatar: String::new(),
             default_agent_runtime: crate::chat::AgentRuntimeConfig::default(),
@@ -971,6 +975,7 @@ fn resolve_mixer_side_model(
  * title_summary：标题总结副任务使用；为空时继承当前会话主模型（无会话时回退有效 Chat 默认）。
  * compression：上下文/历史对话压缩副任务使用；为空时继承当前会话主模型（无会话时回退有效 Chat 默认）。
  * image_generation：生图副任务使用；为空时若当前会话主模型支持直接生图则继承该模型。
+ * prompt_optimize：输入框问题优化副任务使用；为空时继承当前会话主模型。
  * advisor：顾问模型（executor-advisor 模式）——主循环模型可用 `advisor` 工具向它
  *   单次咨询；为空 = 功能关闭（工具不注册），没有继承语义。
  */
@@ -988,6 +993,8 @@ pub struct DefaultModelsConfig {
     #[serde(default)]
     pub image_generation: DefaultModelSelection,
     #[serde(default)]
+    pub prompt_optimize: DefaultModelSelection,
+    #[serde(default)]
     pub advisor: DefaultModelSelection,
 }
 
@@ -999,6 +1006,7 @@ impl Default for DefaultModelsConfig {
             title_summary: DefaultModelSelection::default(),
             compression: DefaultModelSelection::default(),
             image_generation: DefaultModelSelection::default(),
+            prompt_optimize: DefaultModelSelection::default(),
             advisor: DefaultModelSelection::default(),
         }
     }
@@ -1724,6 +1732,13 @@ impl Settings {
         resolve_mixer_side_model(&self.default_models.compression, session, self)
     }
 
+    pub fn effective_prompt_optimize_model_for_session(
+        &self,
+        session: Option<SessionModel<'_>>,
+    ) -> (String, String) {
+        resolve_mixer_side_model(&self.default_models.prompt_optimize, session, self)
+    }
+
     pub fn image_generation_model(&self) -> Option<(String, String)> {
         if self.default_models.image_generation.is_configured()
             && !self.default_models.image_generation.model.trim().is_empty()
@@ -2159,6 +2174,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             &mut settings.default_models.title_summary,
             &mut settings.default_models.compression,
             &mut settings.default_models.image_generation,
+            &mut settings.default_models.prompt_optimize,
         ] {
             if removed_legacy_local_provider_ids.contains(&selection.provider_id) {
                 if let Some((id, model)) = fallback.as_ref() {
@@ -2254,6 +2270,10 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         );
         sanitize_default_model_selection(
             &mut settings.default_models.image_generation,
+            &settings.providers,
+        );
+        sanitize_default_model_selection(
+            &mut settings.default_models.prompt_optimize,
             &settings.providers,
         );
         sanitize_default_model_selection(&mut settings.default_models.advisor, &settings.providers);
@@ -4090,6 +4110,10 @@ mod tests {
             s.effective_compression_model_for_session(None),
             s.effective_chat_model()
         );
+        assert_eq!(
+            s.effective_prompt_optimize_model_for_session(None),
+            s.effective_chat_model()
+        );
         assert!(s.image_generation_model().is_none());
         assert!(s.default_models.vision.provider_id.is_empty());
         assert!(s.default_models.title_summary.provider_id.is_empty());
@@ -4148,6 +4172,10 @@ mod tests {
         );
         assert_eq!(
             settings.effective_vision_model_for_session(Some(session)),
+            ("session".to_string(), "gpt-4.1".to_string())
+        );
+        assert_eq!(
+            settings.effective_prompt_optimize_model_for_session(Some(session)),
             ("session".to_string(), "gpt-4.1".to_string())
         );
     }
@@ -4291,6 +4319,10 @@ mod tests {
             ("compression".to_string(), "compression-model".to_string())
         );
         assert_eq!(
+            s.effective_prompt_optimize_model_for_session(None),
+            s.effective_chat_model()
+        );
+        assert_eq!(
             s.image_generation_model(),
             Some(("image".to_string(), "image-model".to_string()))
         );
@@ -4425,6 +4457,8 @@ mod tests {
             value["defaultModels"]["imageGeneration"]["model"],
             "image-model"
         );
+        assert_eq!(value["defaultModels"]["promptOptimize"]["providerId"], "");
+        assert_eq!(value["defaultModels"]["promptOptimize"]["model"], "");
         assert!(value["defaultModels"]["chat"]["providerId"]
             .as_str()
             .unwrap()

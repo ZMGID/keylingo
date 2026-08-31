@@ -1,6 +1,7 @@
 import { Toggle, SettingRow, SettingsGroup } from '../components'
 import { Button } from '../../components/Button'
 import { ModelPairSelect } from '../ModelPairSelect'
+import { PromptField } from '../ScreenshotTranslationSettings'
 import { resolveModelInfo } from '../../data/modelMatching'
 import type { I18n, Lang } from '../i18n'
 import type { Settings as SettingsData, ChatToolsConfig } from '../../api/tauri'
@@ -12,12 +13,14 @@ interface MixerTabProps {
   chatTools: ChatToolsConfig
   /** 是否已配好聊天供应商；未配好时显示引导文案。 */
   hasChatProvider: boolean
+  defaultPromptOptimize?: string
   onUpdateDefaultModel: (
     key: keyof SettingsData['defaultModels'],
     providerId: string,
     model: string,
   ) => void
   onUpdateChatTools: (updates: Partial<ChatToolsConfig>) => void
+  onUpdateChat: (updates: Partial<NonNullable<SettingsData['chat']>>) => void
 }
 
 /** 模型分工（Mixer）标签页。纯展示：状态留在 SettingsShell。 */
@@ -27,8 +30,10 @@ export function MixerTab({
   lang,
   chatTools,
   hasChatProvider,
+  defaultPromptOptimize = '',
   onUpdateDefaultModel,
   onUpdateChatTools,
+  onUpdateChat,
 }: MixerTabProps) {
   return (
     <>
@@ -45,6 +50,7 @@ export function MixerTab({
               onUpdateDefaultModel('titleSummary', '', '')
               onUpdateDefaultModel('compression', '', '')
               onUpdateDefaultModel('imageGeneration', '', '')
+              onUpdateDefaultModel('promptOptimize', '', '')
             }}
             data-tauri-drag-region="false"
           >
@@ -110,6 +116,28 @@ export function MixerTab({
             }}
           />
         </SettingRow>
+        <SettingRow
+          label={t.defaultPromptOptimizeModel}
+          description={t.defaultPromptOptimizeModelHint}
+        >
+          <ModelPairSelect
+            providerId={settings.defaultModels.promptOptimize?.providerId || ''}
+            model={settings.defaultModels.promptOptimize?.model || ''}
+            providers={settings.providers}
+            inheritLabel={t.mixerAutoModel}
+            onChange={(providerId, model) => {
+              onUpdateDefaultModel('promptOptimize', providerId, model)
+            }}
+          />
+        </SettingRow>
+        <PromptField
+          label={t.promptOptimizePrompt}
+          description={t.promptOptimizePromptHint}
+          value={settings.chat?.promptOptimizePrompt || ''}
+          defaultText={defaultPromptOptimize}
+          restoreLabel={t.restoreDefaultPrompt}
+          onChange={(promptOptimizePrompt) => onUpdateChat({ promptOptimizePrompt })}
+        />
         {!hasChatProvider && (
           <p className="kv-row-desc px-0 pb-2">
             {lang === 'zh' ? '请先在「模型」中添加并配置供应商。' : 'Add and configure a provider under Models first.'}

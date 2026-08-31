@@ -97,6 +97,7 @@ const SOURCE_BADGE: Record<string, { zh: string; en: string; cls: string }> = {
   chat_compression: { zh: '压缩', en: 'Compress', cls: 'bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-300' },
   chat_aux_vision: { zh: '视觉', en: 'Vision', cls: 'bg-pink-500/10 text-pink-600 dark:text-pink-300' },
   chat_image_generation: { zh: '绘图', en: 'Image', cls: 'bg-rose-500/10 text-rose-600 dark:text-rose-300' },
+  chat_prompt_optimize: { zh: '优化', en: 'Rewrite', cls: 'bg-lime-500/10 text-lime-600 dark:text-lime-300' },
   translator: { zh: '翻译', en: 'Translate', cls: 'bg-amber-500/10 text-amber-600 dark:text-amber-300' },
   screenshot_translation: { zh: '截图', en: 'Shot', cls: 'bg-violet-500/10 text-violet-600 dark:text-violet-300' },
   lens: { zh: 'Lens', en: 'Lens', cls: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-300' },

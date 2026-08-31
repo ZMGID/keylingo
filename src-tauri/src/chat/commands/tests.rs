@@ -1783,6 +1783,10 @@ fn effective_side_models_auto_use_session_main_model() {
         ("session".to_string(), "gpt-4.1".to_string())
     );
     assert_eq!(
+        settings.effective_prompt_optimize_model_for_session(Some(session)),
+        ("session".to_string(), "gpt-4.1".to_string())
+    );
+    assert_eq!(
         settings.effective_vision_model_for_session(Some(session)),
         ("session".to_string(), "gpt-4.1".to_string())
     );

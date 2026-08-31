@@ -493,6 +493,8 @@ export type ChatConfig = {
   maxOutputTokens?: number
   defaultLanguage?: string
   systemPrompt?: string
+  /** 输入框问题优化的自定义系统提示词；空则用内置。 */
+  promptOptimizePrompt?: string
   userDisplayName?: string
   userAvatar?: string
   defaultAgentRuntime?: AgentRuntimeConfig
@@ -953,6 +955,7 @@ export type DefaultModelsConfig = {
   titleSummary: DefaultModelSelection
   compression: DefaultModelSelection
   imageGeneration: DefaultModelSelection
+  promptOptimize: DefaultModelSelection
   advisor: DefaultModelSelection
 }
 
@@ -1643,6 +1646,7 @@ function normalizeDefaultModels(
     titleSummary: normalizeDefaultModelSelection(config?.titleSummary),
     compression: normalizeDefaultModelSelection(config?.compression),
     imageGeneration: normalizeDefaultModelSelection(config?.imageGeneration),
+    promptOptimize: normalizeDefaultModelSelection(config?.promptOptimize),
     advisor: normalizeDefaultModelSelection(config?.advisor),
   }
 }
@@ -1727,6 +1731,7 @@ export function normalizeSettings(settings: Settings): Settings {
       maxOutputTokens: current.chat?.maxOutputTokens ?? 16384,
       defaultLanguage: current.chat?.defaultLanguage ?? '',
       systemPrompt: current.chat?.systemPrompt ?? '',
+      promptOptimizePrompt: current.chat?.promptOptimizePrompt ?? '',
       userDisplayName: current.chat?.userDisplayName ?? '',
       userAvatar: current.chat?.userAvatar ?? '',
       // 本地 CLI 覆盖（供应商列表 / 路径 / 停用）与默认运行时：之前重建 chat 时丢掉了，
@@ -1849,6 +1854,10 @@ export type DefaultPromptTemplates = {
   }
   /** Built-in Kivio Chat runtime prompt (exact string injected when chatMode.systemPrompt is empty). */
   chatRuntimePrompt?: string
+  promptOptimizePrompts?: {
+    zh: string
+    en: string
+  }
 }
 
 // macOS 权限状态

@@ -33,6 +33,7 @@ export function makeSettings(overrides: Partial<SettingsData> = {}): SettingsDat
       titleSummary: { providerId: '', model: '' },
       compression: { providerId: '', model: '' },
       imageGeneration: { providerId: '', model: '' },
+      promptOptimize: { providerId: '', model: '' },
       advisor: { providerId: '', model: '' },
     },
     chatTools: { enabled: false, servers: [] },

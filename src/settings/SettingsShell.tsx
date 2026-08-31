@@ -123,6 +123,7 @@ function defaultChatConfig(): NonNullable<SettingsData['chat']> {
     maxOutputTokens: 16384,
     defaultLanguage: '',
     systemPrompt: '',
+    promptOptimizePrompt: '',
     userDisplayName: '',
     userAvatar: '',
     defaultAgentRuntime: {
@@ -186,6 +187,7 @@ function defaultDefaultModels(chatProviderId = '', chatModel = ''): SettingsData
     titleSummary: { providerId: '', model: '' },
     compression: { providerId: '', model: '' },
     imageGeneration: { providerId: '', model: '' },
+    promptOptimize: { providerId: '', model: '' },
     advisor: { providerId: '', model: '' },
   }
 }
@@ -208,6 +210,9 @@ function clearDefaultModelProvider(
     imageGeneration: defaultModels.imageGeneration.providerId === providerId
       ? { providerId: '', model: '' }
       : defaultModels.imageGeneration,
+    promptOptimize: defaultModels.promptOptimize.providerId === providerId
+      ? { providerId: '', model: '' }
+      : defaultModels.promptOptimize,
     advisor: defaultModels.advisor.providerId === providerId
       ? { providerId: '', model: '' }
       : defaultModels.advisor,
@@ -235,6 +240,9 @@ function resolveDefaultModelsAfterModelRemoval(
     imageGeneration: defaultModels.imageGeneration.providerId === providerId
       ? { ...defaultModels.imageGeneration, model: resolveAfterRemoval(defaultModels.imageGeneration.model) }
       : defaultModels.imageGeneration,
+    promptOptimize: defaultModels.promptOptimize.providerId === providerId
+      ? { ...defaultModels.promptOptimize, model: resolveAfterRemoval(defaultModels.promptOptimize.model) }
+      : defaultModels.promptOptimize,
     advisor: defaultModels.advisor.providerId === providerId
       ? { ...defaultModels.advisor, model: resolveAfterRemoval(defaultModels.advisor.model) }
       : defaultModels.advisor,
@@ -2096,8 +2104,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 lang={lang}
                 chatTools={chatTools}
                 hasChatProvider={Boolean(chatProvider)}
+                defaultPromptOptimize={defaultPrompts?.promptOptimizePrompts?.[lang] ?? ''}
                 onUpdateDefaultModel={updateDefaultModel}
                 onUpdateChatTools={updateChatTools}
+                onUpdateChat={updateChat}
               />
             )}
 

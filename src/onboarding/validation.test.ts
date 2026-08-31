@@ -27,6 +27,7 @@ function baseSettings(overrides: Partial<Settings> = {}): Settings {
       titleSummary: { providerId: '', model: '' },
       compression: { providerId: '', model: '' },
       imageGeneration: { providerId: '', model: '' },
+      promptOptimize: { providerId: '', model: '' },
       advisor: { providerId: '', model: '' },
     },
     providers: [],
@@ -87,6 +88,7 @@ const configuredBindings = {
     titleSummary: { providerId: '', model: '' },
     compression: { providerId: '', model: '' },
     imageGeneration: { providerId: '', model: '' },
+    promptOptimize: { providerId: '', model: '' },
     advisor: { providerId: '', model: '' },
   },
 }

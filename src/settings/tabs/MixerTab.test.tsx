@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { MixerTab } from './MixerTab'
@@ -8,7 +8,7 @@ import { i18n } from '../i18n'
 const t = i18n.zh
 
 /**
- * 回归重点：五个模型槽位各自写对 defaultModels 的 key。
+ * 回归重点：六个模型槽位各自写对 defaultModels 的 key。
  * 全是 (key, providerId, model) 同签名调用，接错 key 类型检查不报错。
  */
 function renderTab(overrides: Record<string, unknown> = {}) {
@@ -24,6 +24,7 @@ function renderTab(overrides: Record<string, unknown> = {}) {
     hasChatProvider: true,
     onUpdateDefaultModel: vi.fn(),
     onUpdateChatTools: vi.fn(),
+    onUpdateChat: vi.fn(),
   }
   render(<MixerTab {...props} />)
   return props
@@ -33,15 +34,16 @@ describe('MixerTab', () => {
   it('渲染三个分组', () => {
     renderTab()
     expect(screen.getByText(t.mixerSection)).toBeTruthy()
+    expect(screen.getByText(t.defaultPromptOptimizeModel)).toBeTruthy()
     expect(screen.getByText(t.mixerSubAgentSection)).toBeTruthy()
     expect(screen.getByText(t.mixerAdvisorSection)).toBeTruthy()
   })
 
-  it('「全部恢复自动」一次重置四个槽位（不含 advisor）', async () => {
+  it('「全部恢复自动」一次重置五个槽位（不含 advisor）', async () => {
     const props = renderTab()
     await userEvent.click(screen.getByRole('button', { name: t.mixerResetAuto }))
     const keys = props.onUpdateDefaultModel.mock.calls.map((c) => c[0])
-    expect(keys).toEqual(['vision', 'titleSummary', 'compression', 'imageGeneration'])
+    expect(keys).toEqual(['vision', 'titleSummary', 'compression', 'imageGeneration', 'promptOptimize'])
     // advisor 有独立开关，不该被批量重置清掉
     expect(keys).not.toContain('advisor')
   })
@@ -58,6 +60,7 @@ describe('MixerTab', () => {
         hasChatProvider={false}
         onUpdateDefaultModel={vi.fn()}
         onUpdateChatTools={vi.fn()}
+        onUpdateChat={vi.fn()}
       />,
     )
     expect(screen.getByText(/请先在「模型」中添加并配置供应商/)).toBeTruthy()
@@ -76,6 +79,7 @@ describe('MixerTab', () => {
         titleSummary: { providerId: '', model: '' },
         compression: { providerId: '', model: '' },
         imageGeneration: { providerId: '', model: '' },
+        promptOptimize: { providerId: '', model: '' },
         advisor: { providerId: 'p1', model: 'gpt-4o' },
       },
     })
@@ -94,5 +98,12 @@ describe('MixerTab', () => {
     // 该槽位读写的是 chatTools.subAgent*，不该混进 defaultModels
     expect(props.onUpdateDefaultModel).not.toHaveBeenCalled()
     expect(screen.getByText(t.defaultSubAgentModel)).toBeTruthy()
+  })
+
+  it('优化提示词写入 chat.promptOptimizePrompt', () => {
+    const props = renderTab()
+    const areas = screen.getAllByRole('textbox')
+    fireEvent.change(areas[areas.length - 1], { target: { value: '只改写问题' } })
+    expect(props.onUpdateChat).toHaveBeenCalledWith({ promptOptimizePrompt: '只改写问题' })
   })
 })

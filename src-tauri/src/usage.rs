@@ -829,6 +829,8 @@ pub fn chat_usage_source_for_label(label: &str) -> String {
         "chat_aux_vision".to_string()
     } else if lower.contains("image generation") {
         "chat_image_generation".to_string()
+    } else if lower.contains("prompt optimize") {
+        "chat_prompt_optimize".to_string()
     } else {
         "chat".to_string()
     }

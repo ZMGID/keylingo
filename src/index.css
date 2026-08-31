@@ -883,6 +883,88 @@ html.windows body {
   field-sizing: content;
 }
 
+/* 问题优化：两拍，必须看得出「字被换过」。
+   等待 = 草稿失焦呼吸；落地 = 旧稿先化开淡出，换字后再清晰落入。
+   不用扫光 / background-clip:text（WebView 会退化成色块）。 */
+.chat-composer-shell textarea.is-optimizing {
+  caret-color: transparent;
+  animation: chat-composer-optimize-wait 1.7s ease-in-out infinite;
+}
+
+.chat-composer-shell textarea.is-optimize-out {
+  caret-color: transparent;
+  animation: chat-composer-optimize-out var(--kv-dur-slow) var(--kv-ease-out) forwards;
+}
+
+.chat-composer-shell textarea.is-optimize-reveal {
+  animation: chat-composer-optimize-in calc(var(--kv-dur-slow) + var(--kv-dur-fast)) var(--kv-ease-standard) both;
+}
+
+@keyframes chat-composer-optimize-wait {
+  0%, 100% {
+    opacity: 0.4;
+    filter: blur(0.8px);
+  }
+  50% {
+    opacity: 0.9;
+    filter: blur(0);
+  }
+}
+
+@keyframes chat-composer-optimize-out {
+  from {
+    opacity: 0.72;
+    filter: blur(0.4px);
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes chat-composer-optimize-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+
+.kv-icon-btn.is-prompt-optimizing,
+.kv-icon-btn.is-prompt-optimizing:disabled {
+  opacity: 1;
+  cursor: default;
+  animation: chat-composer-optimize-wand 1.4s ease-in-out infinite;
+}
+
+@keyframes chat-composer-optimize-wand {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer-shell textarea.is-optimizing,
+  .chat-composer-shell textarea.is-optimize-out,
+  .chat-composer-shell textarea.is-optimize-reveal {
+    animation: none;
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+  .kv-icon-btn.is-prompt-optimizing,
+  .kv-icon-btn.is-prompt-optimizing:disabled {
+    animation: none;
+    transform: none;
+  }
+}
+
 /* 斜杠命令高亮：透明字 + 同几何叠层，textarea 只负责光标和选区。 */
 .chat-composer-highlight {
   pointer-events: none;

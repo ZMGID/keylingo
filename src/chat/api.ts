@@ -869,6 +869,13 @@ const mockChatApi = {
     return updated
   },
 
+  async optimizePrompt(text: string, _conversationId?: string | null): Promise<string> {
+    const trimmed = text.trim()
+    if (!trimmed) throw new Error('先输入要优化的问题')
+    if (trimmed.startsWith('/')) throw new Error('斜杠命令无需优化')
+    return `${trimmed}（已优化）`
+  },
+
   async updateConversation(
     conversationId: string,
     updates: {
@@ -1819,6 +1826,14 @@ export const chatApi = {
       throw new Error('Failed to regenerate conversation title')
     }
     return result.conversation
+  },
+
+  async optimizePrompt(text: string, conversationId?: string | null): Promise<string> {
+    if (!isTauriRuntime()) return mockChatApi.optimizePrompt(text, conversationId)
+    return invoke<string>('chat_optimize_prompt', {
+      text,
+      conversationId: conversationId ?? null,
+    })
   },
 
   async updateMessage(
