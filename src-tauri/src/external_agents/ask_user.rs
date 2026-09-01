@@ -85,6 +85,15 @@ const CODECS: &[AskUserCodec] = &[
         auto_allow_ordinary_tools: false,
         opens_host: true,
     },
+    AskUserCodec {
+        agent_id: "cursor-agent",
+        tools: &["cursor/ask_question"],
+        parse: parse_cursor,
+        encode: encode_cursor,
+        unknown_shape: UnknownAskShape::Reject,
+        auto_allow_ordinary_tools: true,
+        opens_host: true,
+    },
 ];
 
 pub fn codec_for(agent_id: &str, tool_name: &str) -> Option<&'static AskUserCodec> {
@@ -525,6 +534,80 @@ fn encode_codex(
     serde_json::json!({ "answers": answers })
 }
 
+/// Cursor ACP `cursor/ask_question` → Kivio 问用户卡片。
+///
+/// 官方形状：`{ toolCallId, title?, questions: [{ id, prompt, options: [{id,label}],
+///   allowMultiple? }] }`。选项 id 原样回传（不是下标）。
+fn parse_cursor(input: &Value) -> Option<AskUserPromptPayload> {
+    let raw = input.get("questions")?.as_array()?;
+    let title = json_str(input, "title").map(str::to_string);
+    let questions: Vec<AskUserQuestion> = raw
+        .iter()
+        .filter_map(|question| {
+            let id = json_str(question, "id")?.to_string();
+            let prompt = json_str(question, "prompt")?.to_string();
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            Some(AskUserOption {
+                                id: json_str(option, "id")?.to_string(),
+                                label: json_str(option, "label")?.to_string(),
+                                description: json_str(option, "description").map(str::to_string),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if options.is_empty() {
+                return None;
+            }
+            Some(AskUserQuestion {
+                id,
+                prompt,
+                options,
+                allow_multiple: json_bool(question, &["allowMultiple", "allow_multiple"]),
+                allow_custom: false,
+            })
+        })
+        .collect();
+    (!questions.is_empty()).then_some(AskUserPromptPayload { title, questions })
+}
+
+/// 用户的选择 → Cursor `CursorAskQuestionResponse`。
+///
+/// `{ outcome: { outcome: "answered", answers: [{ questionId, selectedOptionIds }] } }`。
+fn encode_cursor(
+    _original_input: &Value,
+    prompt: &AskUserPromptPayload,
+    answered: &AskUserResponseResult,
+) -> Value {
+    let answers: Vec<Value> = prompt
+        .questions
+        .iter()
+        .map(|question| {
+            let selected = answered
+                .answers
+                .get(&question.id)
+                .map(|answer| answer.selected_option_ids.clone())
+                .unwrap_or_default();
+            serde_json::json!({
+                "questionId": question.id,
+                "selectedOptionIds": selected,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "outcome": {
+            "outcome": "answered",
+            "answers": answers,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,13 +625,17 @@ mod tests {
         assert!(codec_for("dsh", "AskUserQuestion").is_none());
         assert!(codec_for("dsh", "bash").is_none());
         assert!(codec_for("cursor", "AskUserQuestion").is_none());
+        assert!(codec_for("cursor-agent", "cursor/ask_question").is_some());
+        assert!(codec_for("cursor-agent", "AskUserQuestion").is_none());
         assert!(codec_for("codex", "requestUserInput").is_some());
         assert!(codec_for("codex", "AskUserQuestion").is_none());
         assert!(needs_host("dsh"));
         assert!(!needs_host("claude"));
         assert!(!needs_host("cursor"));
+        assert!(needs_host("cursor-agent"));
         assert!(needs_host("pi"));
         assert!(needs_host("codex"));
+        assert!(auto_allow_ordinary_tools("cursor-agent"));
         assert!(auto_allow_ordinary_tools("dsh"));
         assert!(!auto_allow_ordinary_tools("codex"));
         assert!(!auto_allow_ordinary_tools("claude"));
@@ -965,5 +1052,51 @@ mod tests {
             payload["answers"]["drink"],
             serde_json::json!({ "answers": ["白开水"] })
         );
+    }
+
+    #[test]
+    fn cursor_ask_question_maps_option_ids() {
+        let input = serde_json::json!({
+            "toolCallId": "call_123",
+            "title": "Need input",
+            "questions": [{
+                "id": "q1",
+                "prompt": "Which mode should I use?",
+                "options": [
+                    { "id": "agent", "label": "Agent" },
+                    { "id": "plan", "label": "Plan" }
+                ],
+                "allowMultiple": false
+            }],
+        });
+        let prompt = parse_cursor(&input).expect("cursor ask");
+        assert_eq!(prompt.title.as_deref(), Some("Need input"));
+        assert_eq!(prompt.questions[0].id, "q1");
+        assert_eq!(prompt.questions[0].options[0].id, "agent");
+        assert!(!prompt.questions[0].allow_multiple);
+        let answered = AskUserResponseResult {
+            phase: ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: HashMap::from([(
+                "q1".to_string(),
+                AskUserAnswer {
+                    selected_option_ids: vec!["plan".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        let payload = encode_cursor(&input, &prompt, &answered);
+        assert_eq!(payload["outcome"]["outcome"], "answered");
+        assert_eq!(
+            payload["outcome"]["answers"],
+            serde_json::json!([{
+                "questionId": "q1",
+                "selectedOptionIds": ["plan"]
+            }])
+        );
+        assert!(parse_cursor(&serde_json::json!({})).is_none());
+        assert!(parse_cursor(&serde_json::json!({
+            "questions": [{ "id": "q1", "prompt": "无选项" }],
+        }))
+        .is_none());
     }
 }

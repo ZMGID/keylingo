@@ -3,6 +3,8 @@
 //! Handshake / turn / steer last verified against the 0.148.0 schema (`thread/start` still
 //! takes the kebab `sandbox` string; `turn/start` uses `sandboxPolicy` only as a last-resort
 //! override). 0.149 rejects the obsolete `permissionProfile` field — Kivio never sent it.
+//! 0.152 adds `clock` items and `openai/elicitation` form requests (declined until we have
+//! a form UI; `-32601` would hang the turn).
 //!
 //! Approval: workspace-write / read-only send `approvalPolicy: "on-request"` and route
 //! command/file/permissions RPCs through the existing tool-approval card. The 「完全」档

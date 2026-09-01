@@ -3870,6 +3870,7 @@ mod tests {
         // dsh 没有 `--permission-prompt-tool`：问用户靠 codec 开通道。
         assert!(turn_needs_approval_host(&[], "dsh"));
         assert!(turn_needs_approval_host(&[], "codex"));
+        assert!(turn_needs_approval_host(&[], "cursor-agent"));
         assert!(!turn_needs_approval_host(&[], "cursor"));
         assert!(!turn_needs_approval_host(&[], "claude"));
     }

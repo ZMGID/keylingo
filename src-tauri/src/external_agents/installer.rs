@@ -115,7 +115,7 @@ fn install_spec(agent_id: &str) -> Option<InstallSpec> {
             npm_install_args: &[],
             pypi_package: None,
             script_unix: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
-            script_windows: None,
+            script_windows: Some("irm https://x.ai/cli/install.ps1 | iex"),
             update_args: Some(&["update"]),
             docs: "https://docs.x.ai/build/cli",
             config_dir: Some(".grok"),
@@ -1396,6 +1396,15 @@ mod tests {
             install_plan(&kimi, HostPlatform::Windows).unwrap().program,
             "powershell.exe"
         );
+
+        let grok = install_spec("grok").unwrap();
+        assert!(install_plan(&grok, HostPlatform::Unix)
+            .unwrap()
+            .display
+            .contains("x.ai/cli/install.sh"));
+        let grok_win = install_plan(&grok, HostPlatform::Windows).unwrap();
+        assert_eq!(grok_win.program, "powershell.exe");
+        assert!(grok_win.display.contains("x.ai/cli/install.ps1"));
 
         let pi = install_plan(&install_spec("pi").unwrap(), HostPlatform::Unix).unwrap();
         assert!(pi.args.contains(&"--ignore-scripts".to_string()));

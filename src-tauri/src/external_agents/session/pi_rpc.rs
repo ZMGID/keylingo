@@ -89,6 +89,32 @@ where
     Ok(rx)
 }
 
+async fn abort_pi_turn<W>(
+    stdin: &SharedPiWriter<W>,
+    waiters: &PiControlWaiters,
+    next_control_id: &mut u64,
+) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    // Pi 0.84.4：匹配 Esc 必须先 `clear_queue` 再 `abort`，否则已受理的立刻引导 /
+    // follow-up 会留在 Pi 队列里、下一轮 prompt 被悄悄注入。
+    let clear_id = format!("kivio-control-{next_control_id}");
+    *next_control_id = next_control_id.saturating_add(1);
+    let _ = issue_control_command(
+        stdin,
+        waiters,
+        clear_id,
+        None,
+        json!({ "type": "clear_queue" }),
+    )
+    .await;
+    let abort_id = format!("kivio-control-{next_control_id}");
+    *next_control_id = next_control_id.saturating_add(1);
+    issue_control_command(stdin, waiters, abort_id, None, json!({ "type": "abort" })).await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PiRpcOutcome {
     Continue,
@@ -1520,14 +1546,10 @@ pub fn spawn_pi_rpc_session_actor(
                                 match next {
                                     Some(SessionCommand::Cancel) => {
                                         cancelled.store(true, Ordering::Release);
-                                        let request_id = format!("kivio-control-{}", next_control_id);
-                                        next_control_id = next_control_id.saturating_add(1);
-                                        if issue_control_command(
+                                        if abort_pi_turn(
                                             &session.stdin,
                                             &pending_controls,
-                                            request_id,
-                                            None,
-                                            json!({ "type": "abort" }),
+                                            &mut next_control_id,
                                         )
                                         .await
                                         .is_err()
@@ -2605,6 +2627,34 @@ mod tests {
         .await;
         assert_eq!(result, Err("cancelled".to_string()));
         assert!(matches!(response.await, Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn abort_sends_clear_queue_before_abort() {
+        let (mut output_reader, output_writer) = duplex(2048);
+        let stdin = Arc::new(Mutex::new(output_writer));
+        let waiters: PiControlWaiters = Arc::new(Mutex::new(HashMap::new()));
+        let mut next_control_id = 2_u64;
+        abort_pi_turn(&stdin, &waiters, &mut next_control_id)
+            .await
+            .expect("abort");
+        let mut lines = BufReader::new(&mut output_reader).lines();
+        let first: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read")
+                .expect("clear_queue"),
+        )
+        .expect("json");
+        let second: Value = serde_json::from_str(
+            &lines.next_line().await.expect("read").expect("abort"),
+        )
+        .expect("json");
+        assert_eq!(first["type"], "clear_queue");
+        assert_eq!(second["type"], "abort");
+        assert_eq!(first["id"], "kivio-control-2");
+        assert_eq!(second["id"], "kivio-control-3");
     }
 
     #[tokio::test]

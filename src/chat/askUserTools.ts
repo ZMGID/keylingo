@@ -16,7 +16,12 @@ export function foldToolName(name: string): string {
  */
 export function isAskUserToolName(name: string): boolean {
   const folded = foldToolName(name)
-  if (folded === 'askuser' || folded === 'askuserquestion' || folded === 'requestuserinput') {
+  if (
+    folded === 'askuser'
+    || folded === 'askuserquestion'
+    || folded === 'requestuserinput'
+    || folded === 'cursor/askquestion'
+  ) {
     return true
   }
   return name.toLowerCase() === 'exit_plan_mode'

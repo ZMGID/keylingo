@@ -63,7 +63,7 @@ fn build_gemini_args(
     _o: &RuntimeBuildOptions,
     _p: Option<&str>,
 ) -> Vec<String> {
-    vec!["--experimental-acp".to_string()]
+    vec!["--acp".to_string()]
 }
 
 fn build_hermes_args(
@@ -150,7 +150,7 @@ pub const GEMINI_AGENT_DEF: RuntimeAgentDef = acp_def(
     &[],
     None,
     GEMINI_MODELS,
-    &["--experimental-acp"],
+    &["--acp"],
     GEMINI_ENV,
     build_gemini_args,
 );
@@ -213,7 +213,7 @@ mod tests {
         };
         let cases: &[(&RuntimeAgentDef, &[&str])] = &[
             (&CURSOR_AGENT_DEF, &["acp"]),
-            (&GEMINI_AGENT_DEF, &["--experimental-acp"]),
+            (&GEMINI_AGENT_DEF, &["--acp"]),
             (&OPENCODE_AGENT_DEF, &["acp"]),
             (&HERMES_AGENT_DEF, &["acp", "--accept-hooks"]),
             (&KIMI_AGENT_DEF, &["acp"]),

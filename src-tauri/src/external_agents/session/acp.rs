@@ -9,7 +9,9 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::acp_terminal::{AcpTerminalHost, TerminalReply};
-use crate::external_agents::session::live::SessionCommand;
+use crate::external_agents::session::live::{
+    ApprovalAsk, ApprovalBridge, ApprovalDecision, SessionCommand,
+};
 use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{
     default_model_option, ExternalCliSlashCommand, RuntimeModelOption, UnifiedAgentEvent,
@@ -1681,6 +1683,7 @@ impl AcpSession {
         extra_writable_roots: &[String],
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
+        approvals: &mut Option<ApprovalBridge>,
     ) -> Result<(), String> {
         self.terminals.set_extra_roots(extra_writable_roots);
         // Apply mid-session config changes before sending the prompt (N3).
@@ -1829,6 +1832,20 @@ impl AcpSession {
                     }
                     continue;
                 }
+                if method.starts_with("cursor/") {
+                    handle_cursor_extension(
+                        &mut self.stdin,
+                        &value,
+                        method,
+                        events,
+                        control,
+                        approvals.as_mut(),
+                        &mut self.next_id,
+                        &self.session_id,
+                    )
+                    .await?;
+                    continue;
+                }
                 continue;
             }
 
@@ -1875,6 +1892,20 @@ async fn acp_read_until_id(
         }
         match acp_next_message(reader, stdin, terminals, Duration::from_millis(200)).await? {
             AcpNext::Value(value) => {
+                if let Some(method) = value.get("method").and_then(Value::as_str) {
+                    if method.starts_with("cursor/") {
+                        if let Some(id) = value.get("id") {
+                            let params = value.get("params").unwrap_or(&Value::Null);
+                            write_rpc_result(
+                                stdin,
+                                id,
+                                cursor_handshake_result(method, params),
+                            )
+                            .await?;
+                        }
+                        continue;
+                    }
+                }
                 if let Some(err) = rpc_error_message(&value) {
                     if value.get("id").and_then(|v| v.as_u64()) == Some(target_id) {
                         return Err(err);
@@ -1941,6 +1972,240 @@ async fn flush_terminal_side_effects(
     Ok(())
 }
 
+fn jsonrpc_id_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn acp_json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn cursor_extension_is_blocking(method: &str) -> bool {
+    method == "cursor/ask_question" || method == "cursor/create_plan"
+}
+
+fn cursor_cancelled_result() -> Value {
+    json!({ "outcome": { "outcome": "cancelled" } })
+}
+
+fn cursor_handshake_result(method: &str, params: &Value) -> Value {
+    if cursor_extension_is_blocking(method) {
+        cursor_cancelled_result()
+    } else {
+        cursor_notification_ack(method, params)
+    }
+}
+
+fn cursor_notification_ack(method: &str, params: &Value) -> Value {
+    match method {
+        "cursor/update_todos" => json!({
+            "outcome": {
+                "outcome": "accepted",
+                "todos": params.get("todos").cloned().unwrap_or_else(|| json!([])),
+            }
+        }),
+        "cursor/task" => json!({
+            "outcome": {
+                "outcome": "completed",
+                "agentId": params.get("agentId").cloned(),
+                "durationMs": params.get("durationMs").cloned(),
+            }
+        }),
+        "cursor/generate_image" => match acp_json_str(params, "filePath") {
+            Some(path) => json!({
+                "outcome": { "outcome": "generated", "filePath": path }
+            }),
+            None => cursor_cancelled_result(),
+        },
+        _ => cursor_cancelled_result(),
+    }
+}
+
+fn map_cursor_todos(raw: Option<&Value>) -> Vec<Value> {
+    raw.and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let content = acp_json_str(item, "content")?;
+                    let id = acp_json_str(item, "id").unwrap_or(content);
+                    let status = match item.get("status").and_then(Value::as_str) {
+                        Some("in_progress") => "in_progress",
+                        Some("completed") | Some("cancelled") => "completed",
+                        _ => "pending",
+                    };
+                    Some(json!({ "id": id, "content": content, "status": status }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn cursor_extension_events(method: &str, params: &Value) -> Vec<UnifiedAgentEvent> {
+    match method {
+        "cursor/update_todos" => {
+            let todos = map_cursor_todos(params.get("todos"));
+            if todos.is_empty() {
+                Vec::new()
+            } else {
+                vec![UnifiedAgentEvent::TodoWrite {
+                    todos: json!({ "todos": todos }),
+                }]
+            }
+        }
+        "cursor/task" => {
+            let task_id = acp_json_str(params, "agentId")
+                .or_else(|| acp_json_str(params, "toolCallId"))
+                .unwrap_or("cursor-task")
+                .to_string();
+            let preview = acp_json_str(params, "description")
+                .or_else(|| acp_json_str(params, "prompt"))
+                .unwrap_or("")
+                .to_string();
+            vec![UnifiedAgentEvent::SubagentProgress {
+                task_id,
+                status: "completed".to_string(),
+                preview,
+                steps: Vec::new(),
+            }]
+        }
+        "cursor/generate_image" => {
+            let id = acp_json_str(params, "toolCallId")
+                .unwrap_or("cursor-image")
+                .to_string();
+            let path = acp_json_str(params, "filePath").unwrap_or("");
+            let mut events = vec![UnifiedAgentEvent::ToolUse {
+                id: id.clone(),
+                name: "image_generation".to_string(),
+                input: params.clone(),
+            }];
+            if !path.is_empty() {
+                events.push(UnifiedAgentEvent::ToolResult {
+                    tool_use_id: id,
+                    content: path.to_string(),
+                    is_error: false,
+                });
+            }
+            events
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn cursor_decision_result(method: &str, decision: &ApprovalDecision) -> Value {
+    if method == "cursor/create_plan" {
+        return if decision.approved {
+            json!({ "outcome": { "outcome": "accepted" } })
+        } else {
+            json!({ "outcome": { "outcome": "rejected" } })
+        };
+    }
+    if decision.approved {
+        decision
+            .updated_input
+            .clone()
+            .filter(Value::is_object)
+            .unwrap_or_else(cursor_cancelled_result)
+    } else {
+        json!({ "outcome": { "outcome": "skipped" } })
+    }
+}
+
+async fn handle_cursor_extension(
+    stdin: &mut ChildStdin,
+    value: &Value,
+    method: &str,
+    events: &mpsc::Sender<UnifiedAgentEvent>,
+    control: &mut mpsc::Receiver<SessionCommand>,
+    approvals: Option<&mut ApprovalBridge>,
+    next_id: &mut u64,
+    session_id: &str,
+) -> Result<(), String> {
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+    for event in cursor_extension_events(method, &params) {
+        let _ = events.send(event).await;
+    }
+    let Some(id) = value.get("id") else {
+        return Ok(());
+    };
+    if !cursor_extension_is_blocking(method) {
+        return write_rpc_result(stdin, id, cursor_notification_ack(method, &params)).await;
+    }
+
+    let Some(bridge) = approvals else {
+        return write_rpc_result(stdin, id, cursor_cancelled_result()).await;
+    };
+    let request_id = jsonrpc_id_key(id);
+    let tool_call_id = acp_json_str(&params, "toolCallId")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("cursor-{request_id}"));
+    let tool_name = if method == "cursor/create_plan" {
+        "ExitPlanMode"
+    } else {
+        "cursor/ask_question"
+    };
+    let ask = ApprovalAsk {
+        request_id: request_id.clone(),
+        tool_call_id,
+        tool_name: tool_name.to_string(),
+        input: params,
+        requires_user_interaction: method == "cursor/ask_question",
+    };
+    if bridge.requests.send(ask).await.is_err() {
+        return write_rpc_result(stdin, id, cursor_cancelled_result()).await;
+    }
+    loop {
+        match control.try_recv() {
+            Ok(SessionCommand::Cancel) => {
+                let _ = write_rpc_result(stdin, id, cursor_cancelled_result()).await;
+                let cid = *next_id;
+                *next_id += 1;
+                let _ = write_rpc(
+                    stdin,
+                    cid,
+                    "session/cancel",
+                    json!({ "sessionId": session_id }),
+                )
+                .await;
+                return Err("cancelled".to_string());
+            }
+            Ok(SessionCommand::Close) => {
+                let _ = write_rpc_result(stdin, id, cursor_cancelled_result()).await;
+                return Err("closed".to_string());
+            }
+            Ok(SessionCommand::RunTurn { done, .. }) => {
+                let _ = done.send(Err("session busy".to_string()));
+            }
+            Ok(SessionCommand::Steer { accepted, .. }) => {
+                let _ = accepted.send(false);
+            }
+            Ok(SessionCommand::StopTask { .. }) => {}
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                let _ = write_rpc_result(stdin, id, cursor_cancelled_result()).await;
+                return Err("control channel closed".to_string());
+            }
+        }
+        match timeout(Duration::from_millis(200), bridge.decisions.recv()).await {
+            Ok(Some(decision)) if decision.request_id == request_id => {
+                return write_rpc_result(stdin, id, cursor_decision_result(method, &decision)).await;
+            }
+            Ok(Some(_)) | Err(_) => continue,
+            Ok(None) => {
+                return write_rpc_result(stdin, id, cursor_cancelled_result()).await;
+            }
+        }
+    }
+}
+
 async fn handle_agent_to_client_request(
     value: &Value,
     stdin: &mut ChildStdin,
@@ -1977,7 +2242,10 @@ async fn handle_agent_to_client_request(
         flush_terminal_side_effects(stdin, terminals).await?;
         return Ok(true);
     }
-    if method == "session/update" || method == "_x.ai/session_notification" {
+    if method == "session/update"
+        || method == "_x.ai/session_notification"
+        || method.starts_with("cursor/")
+    {
         return Ok(false);
     }
     if let Some(id) = value.get("id") {
@@ -2017,10 +2285,10 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
                     images,
                     events,
                     done,
-                    // ACP 侧还没有权限审批（目前只有 claude 走 stdio 控制通道），忽略即可 ——
-                    // 通道从来不会被建起来（`run.rs::turn_asks_for_permission` 只对带
-                    // `--permission-prompt-tool` 的 argv 为真，那是 claude 专属 flag）。
-                    approvals: _,
+                    // cursor-agent 的 `cursor/ask_question` / `cursor/create_plan` 是阻塞
+                    // JSON-RPC：必须回结果，否则这一轮挂死。通道由 `ask_user::needs_host`
+                    // 打开；其它 ACP CLI 仍是 `None`。
+                    mut approvals,
                     extra_writable_roots,
                 } => {
                     // Invariant (A4): `run_turn` sends all its `events` before returning, and mpsc
@@ -2035,6 +2303,7 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
                             &extra_writable_roots,
                             &events,
                             &mut rx,
+                            &mut approvals,
                         )
                         .await;
                     let _ = done.send(result);
@@ -2085,6 +2354,65 @@ mod tests {
         assert!(acp_retry_state_note(finished.as_object().unwrap()).is_none());
         let other = json!({ "sessionUpdate": "model_changed", "model_id": "grok-4.6" });
         assert!(acp_retry_state_note(other.as_object().unwrap()).is_none());
+    }
+
+    #[test]
+    fn cursor_todos_and_image_emit_existing_event_kinds() {
+        let todos = json!({
+            "todos": [
+                { "id": "1", "content": "Set up", "status": "completed" },
+                { "id": "2", "content": "Auth", "status": "in_progress" },
+                { "id": "3", "content": "Skip", "status": "cancelled" }
+            ]
+        });
+        let events = cursor_extension_events("cursor/update_todos", &todos);
+        let UnifiedAgentEvent::TodoWrite { todos } = &events[0] else {
+            panic!("expected TodoWrite");
+        };
+        assert_eq!(todos["todos"][2]["status"], json!("completed"));
+
+        let task = json!({
+            "toolCallId": "call_126",
+            "description": "Explore codebase",
+            "prompt": "Find auth",
+            "subagentType": "explore"
+        });
+        let events = cursor_extension_events("cursor/task", &task);
+        assert!(matches!(
+            &events[0],
+            UnifiedAgentEvent::SubagentProgress { task_id, preview, .. }
+                if task_id == "call_126" && preview == "Explore codebase"
+        ));
+
+        let image = json!({
+            "toolCallId": "call_127",
+            "description": "icon",
+            "filePath": "/tmp/icon.png"
+        });
+        let events = cursor_extension_events("cursor/generate_image", &image);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolUse { name, .. } if name == "image_generation"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { content, .. } if content == "/tmp/icon.png"
+        )));
+        assert!(cursor_extension_is_blocking("cursor/ask_question"));
+        assert!(cursor_extension_is_blocking("cursor/create_plan"));
+        assert!(!cursor_extension_is_blocking("cursor/update_todos"));
+        assert_eq!(
+            cursor_decision_result(
+                "cursor/create_plan",
+                &ApprovalDecision {
+                    request_id: "1".to_string(),
+                    approved: true,
+                    updated_input: None,
+                    set_permission_mode: None,
+                }
+            ),
+            json!({ "outcome": { "outcome": "accepted" } })
+        );
     }
 
     #[test]
