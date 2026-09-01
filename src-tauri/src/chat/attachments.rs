@@ -248,7 +248,8 @@ const ARTIFACT_THUMBNAIL_MAX_DIM: u32 = 256;
 
 /// 把一条消息里内联的大图 artifact（含 `tool_calls` 内的）外置到对话附件目录：
 /// 整图写盘并置 `path`，`data_url` 替换为内联缩略图（生成失败则留空，前端按 path 懒加载原图）。
-/// 返回是否发生了修改。已带 `path` 的 artifact 直接跳过，因此可重复安全调用。
+/// 返回是否发生了修改。已带 `path` 且文件在盘上的 artifact 只缩 `data_url` 不再写盘，
+/// 因此可重复安全调用（极噪的图缩略后可能仍超阈值、被再缩一次，幂等无害）。
 pub(crate) fn externalize_message_artifacts(
     app: &AppHandle,
     conversation_id: &str,
@@ -622,18 +623,13 @@ fn normalize_stored_image_mime(mime_type: &str) -> String {
         lowered
     }
 }
-/// 快速判断:消息里是否存在"需要外置"的内联大图(图片 + 无 path + data_url 超阈值)。
+/// 快速判断:消息里是否存在"需要外置"的内联大图(图片 + data_url 超阈值)。
 /// 用于会话持久化的廉价预扫描——没有这类 artifact 就完全不必克隆对话。
+/// 注意**不能**把"已带 path"当豁免条件：present_artifacts 这类已落盘的成果卡
+/// 会同时带 path 和整图 data_url（曾让 10 条消息的会话膨胀到 54MB），
+/// 有 path 只影响外置方式（免写盘、只缩 data_url），不影响是否需要外置。
 pub(crate) fn message_has_inline_image_to_externalize(message: &ChatMessage) -> bool {
     let needs = |artifact: &ChatToolArtifact| {
-        if artifact
-            .path
-            .as_deref()
-            .map(|p| !p.is_empty())
-            .unwrap_or(false)
-        {
-            return false;
-        }
         match parse_data_url(artifact.data_url.trim()) {
             Some((mime, payload)) => {
                 mime.starts_with("image/")
@@ -654,14 +650,15 @@ fn externalize_image_artifact(
     conversation_id: &str,
     artifact: &mut ChatToolArtifact,
 ) -> bool {
-    if artifact
-        .path
-        .as_deref()
-        .map(|p| !p.is_empty())
-        .unwrap_or(false)
-    {
-        return false;
-    }
+    let dir = match conversation_attachments_dir(app, conversation_id) {
+        Ok(dir) => dir,
+        Err(_) => return false,
+    };
+    externalize_image_artifact_in_dir(&dir, artifact)
+}
+
+/// [`externalize_image_artifact`] 的纯目录版（可单测，不需要 `AppHandle`）。
+fn externalize_image_artifact_in_dir(dir: &Path, artifact: &mut ChatToolArtifact) -> bool {
     let Some((mime, payload)) = parse_data_url(artifact.data_url.trim()) else {
         return false;
     };
@@ -675,10 +672,27 @@ fn externalize_image_artifact(
         return false;
     }
 
-    let dir = match conversation_attachments_dir(app, conversation_id) {
-        Ok(dir) => dir,
-        Err(_) => return false,
-    };
+    // 已带 path 且文件在盘上（present_artifacts 等已落盘的成果卡）：字节不必再写一份，
+    // 只把整图 data_url 缩成缩略图。相对 path（外置附件的裸文件名）解析到附件目录，
+    // 带分隔符的按绝对路径原样查。文件丢了就落回下面的写盘分支，把 path 重指过去。
+    if let Some(existing) = artifact
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let on_disk = if existing.contains('/') || existing.contains('\\') {
+            Path::new(existing).is_file()
+        } else {
+            dir.join(existing).is_file()
+        };
+        if on_disk {
+            artifact.size_bytes = artifact.size_bytes.or(Some(bytes.len() as u64));
+            artifact.data_url = make_thumbnail_data_url(&bytes).unwrap_or_default();
+            return true;
+        }
+    }
+
     let file_name = format!(
         "artifact-{}.{}",
         Uuid::new_v4(),
@@ -713,7 +727,8 @@ fn decoded_base64_len(payload: &str) -> usize {
 }
 
 /// 用已有的 `image` crate 生成 PNG 缩略图的内联 data URL。解码/编码失败返回 None。
-fn make_thumbnail_data_url(bytes: &[u8]) -> Option<String> {
+/// 也被 `native_tools::sandbox_exports` 用于成果卡：图片在出生点就只内联缩略图。
+pub(crate) fn make_thumbnail_data_url(bytes: &[u8]) -> Option<String> {
     let img = image::load_from_memory(bytes).ok()?;
     let thumb = img.thumbnail(ARTIFACT_THUMBNAIL_MAX_DIM, ARTIFACT_THUMBNAIL_MAX_DIM);
     let mut buf = Cursor::new(Vec::new());
@@ -1267,16 +1282,101 @@ mod tests {
         let msg = make_message(&format!("data:image/png;base64,{big_payload}"), None);
         assert!(message_has_inline_image_to_externalize(&msg));
 
-        // 已有 path → 跳过
+        // 已有 path 但 data_url 仍是整图 → 一样要外置（present_artifacts 的成果卡
+        // 曾同时带绝对 path 和整图 base64，把 path 当豁免就漏成 54MB 会话文件）。
         let msg = make_message(
             &format!("data:image/png;base64,{big_payload}"),
             Some("artifact-x.png"),
         );
-        assert!(!message_has_inline_image_to_externalize(&msg));
+        assert!(message_has_inline_image_to_externalize(&msg));
 
-        // 小图 → 跳过
+        // 小图 → 跳过（带不带 path 都一样）
         let msg = make_message("data:image/png;base64,aGVsbG8=", None);
         assert!(!message_has_inline_image_to_externalize(&msg));
+        let msg = make_message("data:image/png;base64,aGVsbG8=", Some("artifact-x.png"));
+        assert!(!message_has_inline_image_to_externalize(&msg));
+    }
+
+    /// 造一张 >32KB 阈值、可被 image crate 解码的噪声 PNG。
+    fn big_png_bytes() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(512, 512, |x, y| {
+            let v = x.wrapping_mul(2654435761).wrapping_add(y.wrapping_mul(40503));
+            image::Rgb([(v & 0xff) as u8, ((v >> 8) & 0xff) as u8, ((v >> 16) & 0xff) as u8])
+        });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = buf.into_inner();
+        assert!(bytes.len() > ARTIFACT_INLINE_THRESHOLD_BYTES);
+        bytes
+    }
+
+    fn artifact_with(data_url: String, path: Option<String>) -> ChatToolArtifact {
+        serde_json::from_value(serde_json::json!({
+            "name": "photo.png",
+            "mime_type": "image/png",
+            "data_url": data_url,
+            "path": path,
+        }))
+        .unwrap()
+    }
+
+    /// present_artifacts 的成果卡：文件已在盘上 ⇒ 只缩 data_url，不写第二份字节，path 不动。
+    #[test]
+    fn externalize_shrinks_oversized_inline_when_path_file_exists() {
+        let root = std::env::temp_dir().join(format!("kivio-extart-{}", Uuid::new_v4()));
+        let attachments_dir = root.join("attachments");
+        fs::create_dir_all(&attachments_dir).unwrap();
+        let bytes = big_png_bytes();
+        let original = root.join("delivery.png");
+        fs::write(&original, &bytes).unwrap();
+
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(&bytes)
+        );
+        let original_str = original.to_string_lossy().into_owned();
+        let mut artifact = artifact_with(data_url, Some(original_str.clone()));
+        assert!(externalize_image_artifact_in_dir(&attachments_dir, &mut artifact));
+
+        // path 原样保留（前端按它懒加载原图），附件目录没有多写一份字节
+        assert_eq!(artifact.path.as_deref(), Some(original_str.as_str()));
+        assert_eq!(fs::read_dir(&attachments_dir).unwrap().count(), 0);
+        // data_url 缩成缩略图
+        let (mime, payload) = parse_data_url(&artifact.data_url).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(decoded_base64_len(payload) < bytes.len());
+        assert!(original.is_file(), "原文件不能被动过");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// path 指向的文件丢了：落回写附件目录，path 重指为裸文件名，图不丢。
+    #[test]
+    fn externalize_rehomes_bytes_when_path_file_is_missing() {
+        let root = std::env::temp_dir().join(format!("kivio-extart-{}", Uuid::new_v4()));
+        let attachments_dir = root.join("attachments");
+        fs::create_dir_all(&attachments_dir).unwrap();
+        let bytes = big_png_bytes();
+
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(&bytes)
+        );
+        let missing = root.join("gone.png").to_string_lossy().into_owned();
+        let mut artifact = artifact_with(data_url, Some(missing));
+        assert!(externalize_image_artifact_in_dir(&attachments_dir, &mut artifact));
+
+        let new_path = artifact.path.expect("path");
+        assert!(!new_path.contains('/') && !new_path.contains('\\'), "{new_path}");
+        assert_eq!(
+            fs::read(attachments_dir.join(&new_path)).unwrap(),
+            bytes,
+            "字节要完整落进附件目录"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     /// 造一条只含图片部件的 `model_messages`。

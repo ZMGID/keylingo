@@ -356,6 +356,10 @@ pub fn guess_mime_from_name(name: &str) -> String {
 /// ordinary conversation workbench. The `data_url` (read back) is only populated for files at
 /// or under the export size cap so previews/downloads of small files work; for
 /// larger files only `path`/`size_bytes` are set (the UI can still open it).
+///
+/// 图片是例外：**绝不整张内联**（Kivio 铁律「会话 JSON 不含 base64 整图」——这里生出的
+/// artifact 会原样进 ToolCallRecord 并随会话落盘，曾把 10 条消息的会话撑到 54MB）。
+/// 图片 `data_url` 只放缩略图，前端按 `path` 懒加载原图。
 pub fn build_delivery_artifact_for_path(path: &Path) -> Result<ChatToolArtifact, String> {
     let metadata = fs::metadata(path).map_err(|err| format!("Stat delivery file failed: {err}"))?;
     let size_bytes = metadata.len();
@@ -367,10 +371,14 @@ pub fn build_delivery_artifact_for_path(path: &Path) -> Result<ChatToolArtifact,
     let mime_type = guess_mime_from_name(&name);
     let data_url = if size_bytes <= MAX_EXPORT_FILE_BYTES {
         let bytes = fs::read(path).map_err(|err| format!("Read delivery file failed: {err}"))?;
-        Some(format!(
-            "data:{mime_type};base64,{}",
-            general_purpose::STANDARD.encode(&bytes)
-        ))
+        if mime_type.starts_with("image/") {
+            crate::chat::attachments::make_thumbnail_data_url(&bytes)
+        } else {
+            Some(format!(
+                "data:{mime_type};base64,{}",
+                general_purpose::STANDARD.encode(&bytes)
+            ))
+        }
     } else {
         None
     };
@@ -554,6 +562,52 @@ mod tests {
         for index in 0..24 {
             assert!(dir.join(format!("existing_{index}.txt")).exists());
         }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// 图片成果卡绝不整张内联：data_url 只放缩略图，原图靠 path 懒加载。
+    /// （曾因整图内联把 10 条消息的会话 JSON 撑到 54MB。）非图片小文件维持整份内联。
+    #[test]
+    fn delivery_artifact_inlines_thumbnail_not_full_image() {
+        let dir = temp_dir("delivery_artifact");
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        // >32KB 的噪声 PNG（避免被 PNG 压缩到阈值之下）
+        let img = image::RgbImage::from_fn(512, 512, |x, y| {
+            let v = x.wrapping_mul(2654435761).wrapping_add(y.wrapping_mul(40503));
+            image::Rgb([(v & 0xff) as u8, ((v >> 8) & 0xff) as u8, ((v >> 16) & 0xff) as u8])
+        });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .expect("encode png");
+        let png_bytes = buf.into_inner();
+        let image_path = dir.join("photo.png");
+        fs::write(&image_path, &png_bytes).expect("write png");
+
+        let artifact = build_delivery_artifact_for_path(&image_path).expect("image artifact");
+        assert_eq!(artifact.mime_type, "image/png");
+        assert_eq!(artifact.size_bytes, Some(png_bytes.len() as u64));
+        assert!(artifact.path.is_some());
+        assert!(artifact.data_url.starts_with("data:image/png;base64,"));
+        let payload = artifact.data_url.split_once(',').unwrap().1;
+        assert!(
+            payload.len() / 4 * 3 < png_bytes.len() / 2,
+            "data_url 必须是缩略图而不是整图: {} vs {}",
+            payload.len() / 4 * 3,
+            png_bytes.len()
+        );
+
+        // 非图片小文件保持整份内联（预览/下载依赖它）
+        let text_path = dir.join("report.txt");
+        fs::write(&text_path, b"hello kivio").expect("write txt");
+        let artifact = build_delivery_artifact_for_path(&text_path).expect("text artifact");
+        assert_eq!(artifact.mime_type, "text/plain");
+        assert_eq!(artifact.data_url, format!(
+            "data:text/plain;base64,{}",
+            general_purpose::STANDARD.encode(b"hello kivio")
+        ));
+
         let _ = fs::remove_dir_all(dir);
     }
 
