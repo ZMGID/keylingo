@@ -234,6 +234,7 @@ impl OpenAiChatProvider<'_> {
         let mut tool_partials: Vec<PartialToolCall> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut usage: Option<ModelUsage> = None;
+        let mut last_reasoning_summary_index: Option<u64> = None;
         // 代理仿 OpenRouter 出图：流式 chunk 的 `delta.images` 逐帧累积，finish 后并入 output。
         let mut images: Vec<GeneratedImageData> = Vec::new();
 
@@ -319,10 +320,12 @@ impl OpenAiChatProvider<'_> {
                     finish_reason = Some(reason.to_string());
                 }
                 handle_openai_stream_tool_calls(&value, &mut tool_partials, sink)?;
-                if let Some((reasoning, mode)) = extract_chat_stream_reasoning(&value) {
-                    if let Some(delta) =
-                        append_chat_stream_text(&mut reasoning_full, reasoning, mode)
-                    {
+                for fragment in collect_chat_reasoning_fragments(&value) {
+                    if let Some(delta) = append_chat_stream_reasoning(
+                        &mut reasoning_full,
+                        &mut last_reasoning_summary_index,
+                        &fragment,
+                    ) {
                         sink.emit(StreamPart::ReasoningDelta { delta })?;
                     }
                 }
@@ -789,13 +792,78 @@ fn assistant_text_from_openai_message(message: &Value) -> String {
 }
 
 fn reasoning_from_openai_message(message: &Value) -> Option<String> {
-    message
-        .get("reasoning_content")
-        .or_else(|| message.get("reasoning"))
-        .and_then(|value| value.as_str())
+    if let Some(joined) = join_reasoning_details(message.get("reasoning_details")) {
+        return Some(joined);
+    }
+    reasoning_string_field(message)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn reasoning_string_field(value: &Value) -> Option<&str> {
+    value
+        .get("reasoning_content")
+        .or_else(|| value.get("reasoning"))
+        .and_then(Value::as_str)
+        .filter(|content| !content.is_empty())
+}
+
+fn summary_index_in(value: &Value) -> Option<u64> {
+    value.get("summary_index").and_then(Value::as_u64)
+}
+
+fn reasoning_detail_text(item: &Value) -> Option<&str> {
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+    if kind.contains("encrypted") {
+        return None;
+    }
+    item.get("summary")
+        .or_else(|| item.get("text"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty() && *text != "[REDACTED]")
+}
+
+fn join_reasoning_details(details: Option<&Value>) -> Option<String> {
+    let items = details?.as_array()?;
+    let mut parts = Vec::new();
+    for item in items {
+        if let Some(text) = reasoning_detail_text(item) {
+            parts.push(text);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChatReasoningFragment {
+    text: String,
+    mode: ChatStreamTextMode,
+    summary_index: Option<u64>,
+}
+
+fn fragments_from_reasoning_details(
+    details: Option<&Value>,
+    mode: ChatStreamTextMode,
+) -> Vec<ChatReasoningFragment> {
+    let Some(items) = details.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let text = reasoning_detail_text(item)?.to_string();
+            Some(ChatReasoningFragment {
+                text,
+                mode,
+                summary_index: item.get("index").and_then(Value::as_u64),
+            })
+        })
+        .collect()
 }
 
 fn model_usage_from_openai_response(value: &Value) -> Option<ModelUsage> {
@@ -836,32 +904,155 @@ fn extract_chat_stream_text(value: &Value) -> Option<(&str, ChatStreamTextMode)>
         .map(|content| (content, ChatStreamTextMode::Snapshot))
 }
 
-fn extract_chat_stream_reasoning(value: &Value) -> Option<(&str, ChatStreamTextMode)> {
-    let choice = value.get("choices").and_then(|choices| choices.get(0))?;
+fn collect_chat_reasoning_fragments(value: &Value) -> Vec<ChatReasoningFragment> {
+    let Some(choice) = value.get("choices").and_then(|choices| choices.get(0)) else {
+        return Vec::new();
+    };
+    if let Some(delta) = choice.get("delta") {
+        let mut parts = fragments_from_reasoning_details(
+            delta.get("reasoning_details"),
+            ChatStreamTextMode::Delta,
+        );
+        if parts.is_empty() {
+            if let Some(text) = reasoning_string_field(delta) {
+                parts.push(ChatReasoningFragment {
+                    text: text.to_string(),
+                    mode: ChatStreamTextMode::Delta,
+                    summary_index: summary_index_in(delta)
+                        .or_else(|| summary_index_in(choice))
+                        .or_else(|| summary_index_in(value)),
+                });
+            }
+        }
+        return parts;
+    }
+    if let Some(message) = choice.get("message") {
+        let mut parts = fragments_from_reasoning_details(
+            message.get("reasoning_details"),
+            ChatStreamTextMode::Snapshot,
+        );
+        if parts.is_empty() {
+            if let Some(text) = reasoning_string_field(message) {
+                parts.push(ChatReasoningFragment {
+                    text: text.to_string(),
+                    mode: ChatStreamTextMode::Snapshot,
+                    summary_index: summary_index_in(message)
+                        .or_else(|| summary_index_in(choice))
+                        .or_else(|| summary_index_in(value)),
+                });
+            }
+        }
+        return parts;
+    }
+    Vec::new()
+}
 
-    if let Some(reasoning) = choice
-        .get("delta")
-        .and_then(|delta| {
-            delta
-                .get("reasoning_content")
-                .or_else(|| delta.get("reasoning"))
-        })
-        .and_then(|content| content.as_str())
-        .filter(|content| !content.is_empty())
+/// GPT-5 concise 标题经 Chat Completions 中转时常整段进 `reasoning_content`，
+/// 且没有 `summary_index`。下一条又以大写字母开头、中间没空格，就会粘成
+/// `constraintsAnalyzing`。token 增量（"Par"+"sing"）不会命中。
+fn glued_summary_separator(existing: &str, incoming: &str) -> &'static str {
+    if existing.is_empty() || incoming.is_empty() {
+        return "";
+    }
+    if existing.ends_with('\n')
+        || existing.ends_with(' ')
+        || incoming.starts_with('\n')
+        || incoming.starts_with(' ')
     {
-        return Some((reasoning, ChatStreamTextMode::Delta));
+        return "";
+    }
+    let Some(last) = existing.chars().last() else {
+        return "";
+    };
+    let Some(first) = incoming.chars().next() else {
+        return "";
+    };
+    if last.is_lowercase() && first.is_uppercase() && existing.len() >= 8 && incoming.len() >= 8 {
+        "\n\n"
+    } else {
+        ""
+    }
+}
+
+fn reasoning_part_break(existing: &str) -> &'static str {
+    if existing.is_empty() || existing.ends_with("\n\n") {
+        ""
+    } else if existing.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    }
+}
+
+fn append_chat_stream_reasoning(
+    full: &mut String,
+    last_summary_index: &mut Option<u64>,
+    fragment: &ChatReasoningFragment,
+) -> Option<String> {
+    if fragment.text.is_empty() {
+        return None;
     }
 
-    choice
-        .get("message")
-        .and_then(|message| {
-            message
-                .get("reasoning_content")
-                .or_else(|| message.get("reasoning"))
-        })
-        .and_then(|content| content.as_str())
-        .filter(|content| !content.is_empty())
-        .map(|content| (content, ChatStreamTextMode::Snapshot))
+    let mut emitted = String::new();
+    if let Some(index) = fragment.summary_index {
+        let changed = last_summary_index.is_some_and(|prev| prev != index);
+        *last_summary_index = Some(index);
+        if changed {
+            let br = reasoning_part_break(full);
+            full.push_str(br);
+            emitted.push_str(br);
+        }
+    }
+
+    match fragment.mode {
+        ChatStreamTextMode::Delta => {
+            if fragment.summary_index.is_none() {
+                let sep = glued_summary_separator(full, &fragment.text);
+                full.push_str(sep);
+                emitted.push_str(sep);
+            }
+            full.push_str(&fragment.text);
+            emitted.push_str(&fragment.text);
+            Some(emitted)
+        }
+        ChatStreamTextMode::Snapshot => {
+            let text = fragment.text.as_str();
+            if text == full.as_str() || full.starts_with(text) {
+                return if emitted.is_empty() {
+                    None
+                } else {
+                    Some(emitted)
+                };
+            }
+            if text.starts_with(full.as_str()) {
+                let suffix = &text[full.len()..];
+                if fragment.summary_index.is_none() {
+                    let sep = glued_summary_separator(full, suffix);
+                    emitted.push_str(sep);
+                    let rebuilt = format!("{full}{sep}{suffix}");
+                    full.clear();
+                    full.push_str(&rebuilt);
+                } else {
+                    full.clear();
+                    full.push_str(text);
+                }
+                emitted.push_str(suffix);
+                return if emitted.is_empty() {
+                    None
+                } else {
+                    Some(emitted)
+                };
+            }
+            if fragment.summary_index.is_none() {
+                let sep = glued_summary_separator(full, text);
+                full.push_str(sep);
+                emitted.push_str(sep);
+            }
+            full.push_str(text);
+            emitted.push_str(text);
+            Some(emitted)
+        }
+    }
 }
 
 fn append_chat_stream_text(
@@ -1638,6 +1829,119 @@ mod tests {
             Some(8)
         );
         assert_eq!(output.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    fn fold_chat_reasoning(chunks: &[Value]) -> String {
+        let mut full = String::new();
+        let mut last_index = None;
+        for chunk in chunks {
+            for fragment in collect_chat_reasoning_fragments(chunk) {
+                let _ = append_chat_stream_reasoning(&mut full, &mut last_index, &fragment);
+            }
+        }
+        full
+    }
+
+    fn reasoning_delta_chunk(text: &str) -> Value {
+        serde_json::json!({
+            "choices": [{ "delta": { "reasoning_content": text } }]
+        })
+    }
+
+    #[test]
+    fn chat_stream_glues_token_deltas_but_splits_summary_titles() {
+        // DeepSeek 式 token 增量必须仍拼成一词。
+        assert_eq!(
+            fold_chat_reasoning(&[
+                reasoning_delta_chunk("Par"),
+                reasoning_delta_chunk("sing table"),
+            ]),
+            "Parsing table"
+        );
+
+        // 中转把 GPT-5 每条 concise 标题整段塞进 reasoning_content、中间没空格。
+        assert_eq!(
+            fold_chat_reasoning(&[
+                reasoning_delta_chunk("Parsing table and defining drawing constraints"),
+                reasoning_delta_chunk("Analyzing shape-based drawing strategy for guarantee"),
+            ]),
+            "Parsing table and defining drawing constraints\n\n\
+             Analyzing shape-based drawing strategy for guarantee"
+        );
+    }
+
+    #[test]
+    fn chat_stream_reasoning_summary_index_separates_parts() {
+        let chunks = [
+            serde_json::json!({
+                "choices": [{ "delta": {
+                    "reasoning_content": "Establishing 21 as minimal guarantee",
+                    "summary_index": 0
+                }}]
+            }),
+            serde_json::json!({
+                "choices": [{ "delta": {
+                    "reasoning_content": " by feel",
+                    "summary_index": 0
+                }}]
+            }),
+            serde_json::json!({
+                "choices": [{ "delta": {
+                    "reasoning_content": "Confirming rounds guarantee A and P",
+                    "summary_index": 1
+                }}]
+            }),
+        ];
+        assert_eq!(
+            fold_chat_reasoning(&chunks),
+            "Establishing 21 as minimal guarantee by feel\n\n\
+             Confirming rounds guarantee A and P"
+        );
+    }
+
+    #[test]
+    fn chat_stream_reasoning_details_are_joined_by_index() {
+        let chunks = [
+            serde_json::json!({
+                "choices": [{ "delta": { "reasoning_details": [{
+                    "type": "reasoning.summary",
+                    "summary": "Parsing table and defining drawing constraints",
+                    "index": 0
+                }]}}]
+            }),
+            serde_json::json!({
+                "choices": [{ "delta": { "reasoning_details": [{
+                    "type": "reasoning.summary",
+                    "summary": "Analyzing shape-based drawing strategy for guarantee",
+                    "index": 1
+                }]}}]
+            }),
+        ];
+        assert_eq!(
+            fold_chat_reasoning(&chunks),
+            "Parsing table and defining drawing constraints\n\n\
+             Analyzing shape-based drawing strategy for guarantee"
+        );
+    }
+
+    #[test]
+    fn nonstream_reasoning_details_are_preferred_over_glued_string() {
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "21",
+                    "reasoning_content": "TitleATitleB",
+                    "reasoning_details": [
+                        { "type": "reasoning.summary", "summary": "Title A", "index": 0 },
+                        { "type": "reasoning.summary", "summary": "Title B", "index": 1 }
+                    ]
+                }
+            }]
+        });
+        let output = output_from_chat_completion(&value, "{}", "test").expect("output");
+        assert_eq!(output.reasoning.as_deref(), Some("Title A\n\nTitle B"));
     }
 
     #[test]

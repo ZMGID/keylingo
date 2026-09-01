@@ -790,6 +790,9 @@ struct ResponsesStreamState {
     /// Responses 上可自行决定用托管出图回答，此时 `message.output_text` 是空串
     /// ——图就是答案。不收这些图会让整轮变成「空助手响应」而报错。
     images: Vec<GeneratedImageData>,
+    /// 当前 reasoning summary part 的 `summary_index`。GPT-5 系 concise 标题
+    /// 通常没有尾换行；index 一变就要另起一段，否则「constraintsAnalyzing」。
+    last_reasoning_summary_index: Option<u64>,
 }
 
 impl ResponsesStreamState {
@@ -851,6 +854,62 @@ impl ResponsesStreamState {
             None => (Vec::new(), Vec::new()),
         };
         sink.emit(StreamPart::WebSearch { queries, citations })
+    }
+
+    fn summary_index_of(value: &Value) -> Option<u64> {
+        value.get("summary_index").and_then(Value::as_u64)
+    }
+
+    /// `summary_index` 变了，或 `part.added` 开了下一条（网关没带 index）时插入 `\n\n`。
+    fn begin_reasoning_summary_part(
+        &mut self,
+        summary_index: Option<u64>,
+        force_new: bool,
+        sink: &mut (dyn StreamSink + Send),
+    ) -> Result<(), ModelError> {
+        let started_new_part = match summary_index {
+            Some(index) => {
+                let changed = self
+                    .last_reasoning_summary_index
+                    .is_some_and(|prev| prev != index);
+                self.last_reasoning_summary_index = Some(index);
+                changed
+            }
+            None => force_new && !self.reasoning.is_empty(),
+        };
+        if started_new_part {
+            self.emit_reasoning_summary_separator(sink)?;
+        }
+        Ok(())
+    }
+
+    fn emit_reasoning_summary_separator(
+        &mut self,
+        sink: &mut (dyn StreamSink + Send),
+    ) -> Result<(), ModelError> {
+        if self.reasoning.is_empty() || self.reasoning.ends_with("\n\n") {
+            return Ok(());
+        }
+        let separator = if self.reasoning.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        self.push_reasoning_delta(separator, sink)
+    }
+
+    fn push_reasoning_delta(
+        &mut self,
+        delta: &str,
+        sink: &mut (dyn StreamSink + Send),
+    ) -> Result<(), ModelError> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        self.reasoning.push_str(delta);
+        sink.emit(StreamPart::ReasoningDelta {
+            delta: delta.to_string(),
+        })
     }
 
     fn finalize_tool_call(
@@ -951,11 +1010,13 @@ fn reasoning_item_replayable(item: &Value) -> bool {
 
 /// 请求体的 `input` 里是否带了回放的 reasoning item（学习兜底的触发前提）。
 fn body_replays_reasoning_items(body: &Value) -> bool {
-    body.get("input").and_then(Value::as_array).is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
-    })
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        })
 }
 
 /// 该错误是否可能是端点拒绝 reasoning 回放。各家中转的 4xx 文案千奇百怪，无法可靠
@@ -1017,16 +1078,26 @@ fn handle_responses_stream_event(
                 }
             }
         }
-        "response.reasoning_summary_text.delta"
-        | "response.reasoning_text.delta"
-        | "response.reasoning_summary.delta" => {
+        "response.reasoning_summary_part.added" => {
+            state.begin_reasoning_summary_part(
+                ResponsesStreamState::summary_index_of(value),
+                true,
+                sink,
+            )?;
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_summary.delta" => {
+            state.begin_reasoning_summary_part(
+                ResponsesStreamState::summary_index_of(value),
+                false,
+                sink,
+            )?;
             if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                if !delta.is_empty() {
-                    state.reasoning.push_str(delta);
-                    sink.emit(StreamPart::ReasoningDelta {
-                        delta: delta.to_string(),
-                    })?;
-                }
+                state.push_reasoning_delta(delta, sink)?;
+            }
+        }
+        "response.reasoning_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                state.push_reasoning_delta(delta, sink)?;
             }
         }
         "response.output_item.added" => {
@@ -2139,7 +2210,11 @@ mod tests {
                 ] }
             }),
         ]);
-        assert_eq!(output.reasoning_items.len(), 1, "只收带密文的，且按 id 去重");
+        assert_eq!(
+            output.reasoning_items.len(),
+            1,
+            "只收带密文的，且按 id 去重"
+        );
         assert_eq!(output.reasoning_items[0].item["id"], "rs_1");
         assert_eq!(output.reasoning_items[0].item["encrypted_content"], "gAAA");
     }
@@ -2294,7 +2369,9 @@ mod tests {
             "Responses stream Error: 502 Bad Gateway - upstream"
         ));
         // 网络错误无状态码 → 不学习。
-        assert!(!error_maybe_rejects_reasoning_replay("connection reset by peer"));
+        assert!(!error_maybe_rejects_reasoning_replay(
+            "connection reset by peer"
+        ));
     }
 
     #[test]
@@ -2400,6 +2477,87 @@ mod tests {
                 .filter(|p| matches!(p, StreamPart::TextDelta { .. }))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn stream_reasoning_summary_parts_are_separated() {
+        // GPT-5 / gpt-5.6-sol 的 reasoning summary 是 `summary[]` 里多条
+        // `summary_text`。官方流是 part.added → text.delta* → part.done，换 part
+        // 时 `summary_index` 递增。每条 concise 标题通常没有尾换行，如果只把
+        // delta 首尾相接，界面上就会变成「constraintsAnalyzing」这种粘连段。
+        let (_parts, output) = run_events(&[
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "part": { "type": "summary_text", "text": "" }
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "Parsing table and defining drawing constraints"
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 1,
+                "part": { "type": "summary_text", "text": "" }
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 1,
+                "delta": "Analyzing shape-based drawing strategy for guarantee"
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 1,
+                "delta": " by feel"
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": { "status": "completed" }
+            }),
+        ]);
+        assert_eq!(
+            output.reasoning.as_deref(),
+            Some(
+                "Parsing table and defining drawing constraints\n\n\
+                 Analyzing shape-based drawing strategy for guarantee by feel"
+            )
+        );
+    }
+
+    #[test]
+    fn stream_reasoning_summary_index_separates_without_part_added() {
+        // 有些中转只推 text.delta + summary_index，不发 part.added。
+        let (_parts, output) = run_events(&[
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 0,
+                "delta": "Establishing 21 as minimal guarantee"
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 1,
+                "delta": "Confirming rounds guarantee A and P"
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": { "status": "completed" }
+            }),
+        ]);
+        assert_eq!(
+            output.reasoning.as_deref(),
+            Some("Establishing 21 as minimal guarantee\n\nConfirming rounds guarantee A and P")
         );
     }
 
@@ -2591,10 +2749,7 @@ mod tests {
             "data: {\"type\":\"error\",\"message\":\"stream ended without terminal event or completed response\"}\n",
         );
         let err = output_from_sse_body(body).expect_err("empty stream should fail");
-        assert!(
-            err.to_string().contains("without terminal"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("without terminal"), "got {err}");
     }
 
     /// A plain JSON body is not mistaken for SSE; the happy path stays unchanged.
