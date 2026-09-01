@@ -259,15 +259,6 @@ pub fn run() {
             // `conv_*` 目录，非空的孤儿工作区只报数不删（里面是用户产物）。
             chat::gc::sweep_conversation_side_artifacts(app.handle());
 
-            // 崩溃残留的中断草稿日志:按每个 message_id 的最后一行合并回会话文件后删除。
-            // setup 阶段不可能有活跃 run,没有并发写冲突。
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    chat::draft_journal::recover_orphan_drafts(&handle).await;
-                });
-            }
-
             // 周期性回收闲置的持久外部 CLI **进程**（10 分钟无活动即丢弃 → actor 关闭子进程）。
             // 原生会话 id 仍落在 disk 上，下一轮（或重新打开这条对话）必须 resume，不是开新会话。
             {
@@ -371,6 +362,17 @@ pub fn run() {
                 rapidocr::RapidOcrClient::new(offline_models),
             ));
             app.manage(chat::repository::ConversationRepository::default());
+
+            // 崩溃残留的中断草稿日志:按每个 message_id 的最后一行合并回会话文件后删除。
+            // setup 阶段不可能有活跃 run,没有并发写冲突。
+            // 必须放在 ConversationRepository manage 之后：恢复路径要取仓库状态，
+            // 曾在 manage 之前 spawn，有草稿残留且调度赶巧时直接 state() panic、启动即崩。
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    chat::draft_journal::recover_orphan_drafts(&handle).await;
+                });
+            }
             // Dock 的 workspace 文件监听服务（文件树 / Git 面板的秒级刷新源）。
             app.manage(std::sync::Arc::new(dock::watch::WorkspaceWatchService::new(
                 app.handle().clone(),
