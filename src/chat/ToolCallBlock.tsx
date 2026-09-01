@@ -116,6 +116,12 @@ function parsedArguments(toolCall: ToolCallRecord): Record<string, unknown> | nu
   }
 }
 
+function isKivioToolDraft(toolCall: ToolCallRecord): boolean {
+  const args = parsedArguments(toolCall)
+  if (args?._kivioToolDraft === true) return true
+  return Boolean(objectValue(objectValue(toolCall.structured_content ?? toolCall.structuredContent)?.toolDraft))
+}
+
 /** 展示映射用的规范工具名（别名表在 `canonicalToolName`）。
  *
  *  **只用于 switch 匹配，不要拿它当显示文案**：MCP 工具名（`mcp__server__toolName`）的
@@ -1605,6 +1611,7 @@ function getToolTarget(toolCall: ToolCallRecord): string {
 }
 
 function getArgumentPreview(toolCall: ToolCallRecord): string {
+  if (isKivioToolDraft(toolCall)) return ''
   const rawName = toolRawName(toolCall)
   const args = parsedArguments(toolCall)
   if (rawName === 'todo_write') {
@@ -1651,6 +1658,7 @@ function getArgumentPreview(toolCall: ToolCallRecord): string {
 }
 
 function getResultPreview(toolCall: ToolCallRecord): string {
+  if (isKivioToolDraft(toolCall)) return ''
   const rawName = toolRawName(toolCall)
   const todoItems = structuredTodoState(toolCall)?.items
   if (rawName === 'todo_write' || rawName === 'todo_update' || todoItems) {

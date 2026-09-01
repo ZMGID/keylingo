@@ -148,6 +148,35 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText(/正在生成工具参数/)).toBeInTheDocument()
   })
 
+  it('does not dump present_artifacts draft json or character counts', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'present_artifacts',
+          name: 'present_artifacts',
+          source: 'native',
+          status: 'pending',
+          result_preview: '正在生成工具参数…已收到 92,353 字符',
+          arguments: JSON.stringify({
+            _kivioToolDraft: true,
+            argumentChars: 92353,
+            phase: 'generating_arguments',
+            tool: 'present_artifacts',
+          }),
+          structured_content: {
+            toolDraft: {
+              argumentChars: 92353,
+              phase: 'generating_arguments',
+              toolName: 'present_artifacts',
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('present_artifacts')).toBeInTheDocument()
+    expect(screen.queryByText(/92,353|92353|_kivioToolDraft|已收到/)).not.toBeInTheDocument()
+  })
+
   it('shows the command as the bash target', () => {
     render(
       <ToolCallBlock
