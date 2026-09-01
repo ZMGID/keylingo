@@ -852,7 +852,11 @@ fn estimate_model_messages_tokens(messages: &[ModelMessage]) -> usize {
                     } => estimate_tokens(name) + estimate_tokens(arguments_raw),
                     MessagePart::ToolResult { content, .. } => estimate_tokens(content),
                     // 图片部件记 0（与 estimate_value_tokens 同口径，不把 base64 算进 token）。
-                    MessagePart::Image { .. } | MessagePart::ImageUrl { .. } => 0,
+                    // reasoning item 同理：encrypted_content 是密文 base64，按字符估算会
+                    // 数倍虚高；其真实占用由 usage 锚点覆盖。
+                    MessagePart::Image { .. }
+                    | MessagePart::ImageUrl { .. }
+                    | MessagePart::ReasoningItem { .. } => 0,
                 })
                 .sum();
             parts + 4

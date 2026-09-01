@@ -288,6 +288,7 @@ impl OpenAiChatProvider<'_> {
                         cancelled: false,
                         web_search: None,
                         images,
+                        reasoning_items: Vec::new(),
                     };
                     self.record_usage_success(
                         &request,
@@ -356,6 +357,7 @@ impl OpenAiChatProvider<'_> {
             cancelled: false,
             web_search: None,
             images,
+            reasoning_items: Vec::new(),
         };
         self.record_usage_success(
             &request,
@@ -729,6 +731,7 @@ pub fn output_from_chat_completion(
         cancelled: false,
         web_search: None,
         images,
+        reasoning_items: Vec::new(),
     })
 }
 

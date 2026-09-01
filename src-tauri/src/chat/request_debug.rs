@@ -472,6 +472,7 @@ mod tests {
             cancelled: false,
             web_search: None,
             images: Vec::new(),
+            reasoning_items: Vec::new(),
         };
 
         let mut headers = BTreeMap::new();

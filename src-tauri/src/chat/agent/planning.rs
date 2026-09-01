@@ -721,6 +721,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
                     cancelled: false,
                     web_search: None,
                     images: Vec::new(),
+                    reasoning_items: Vec::new(),
                 }
             }
             Err(err) => return Err(err),

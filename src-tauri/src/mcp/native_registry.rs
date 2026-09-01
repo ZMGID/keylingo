@@ -46,6 +46,7 @@ use super::types::{
     native_read_file_tool, native_run_command_tool, native_save_assistant_tool,
     native_search_files_tool, native_web_fetch_tool, native_web_search_tool,
     native_write_file_tool, ChatToolArtifact, ChatToolDefinition, McpToolCallResult,
+    PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS,
 };
 
 /// Gate signature mirrors `list_native_builtin_tool_defs(native,
@@ -983,7 +984,7 @@ fn call_bash_output(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             .unwrap_or(false);
         let conversation_id = ctx.native_ctx.map(|c| c.conversation_id.as_str());
         let content = if has_job {
-            crate::native_tools::bash_output(ctx.state, ctx.arguments, conversation_id)?
+            crate::native_tools::bash_output(ctx.state, ctx.arguments, conversation_id).await?
         } else {
             crate::native_tools::list_background(ctx.state, ctx.arguments, conversation_id)?
         };
@@ -1047,6 +1048,13 @@ fn call_present_artifacts(
     workspace: &NativeToolWorkspace,
     arguments: &Value,
 ) -> Result<McpToolCallResult, String> {
+    let encoded = serde_json::to_string(arguments).unwrap_or_default();
+    if encoded.chars().count() > PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS {
+        return Err(
+            "present_artifacts arguments are too large. Pass only artifact_ids or paths; never file contents, base64, or data URLs."
+                .to_string(),
+        );
+    }
     let artifact_ids = string_list_argument(arguments, "artifact_ids")?;
     let paths = string_list_argument(arguments, "paths")?;
     if artifact_ids.is_empty() && paths.is_empty() {
@@ -1577,5 +1585,19 @@ mod tests {
                 "artifactIds": []
             }))
         );
+    }
+
+    #[test]
+    fn present_artifacts_rejects_oversized_payload() {
+        let workspace = NativeToolWorkspace::standalone();
+        let err = call_present_artifacts(
+            &workspace,
+            &serde_json::json!({
+                "artifact_ids": ["art_a"],
+                "caption": "x".repeat(PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS),
+            }),
+        )
+        .expect_err("oversized payload");
+        assert!(err.contains("too large"), "{err}");
     }
 }

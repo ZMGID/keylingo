@@ -83,6 +83,21 @@ pub enum MessagePart {
     Reasoning {
         text: String,
     },
+    /// OpenAI Responses 原生 reasoning item（`{"type":"reasoning","id":"rs_…",
+    /// "summary":[…],"encrypted_content":"…"}`），整只按输出顺序保存。
+    ///
+    /// **为什么必须回放**：Responses 上的 gpt-5 / codex 系模型做工具循环时，思维链
+    /// 靠这些 item 跨轮延续——Codex 官方客户端每轮都把它们随 `input` 原样送回
+    /// （store:false + include:["reasoning.encrypted_content"]）。不回放等于每个
+    /// 工具轮把模型的思维链清零，多步任务（生成→检查→重做）退化成短视反应。
+    ///
+    /// `model` 记录产出该 item 的模型：encrypted_content 只有同模型能解，会话中途
+    /// 换模型后旧 item 不得回放（否则 400）。仅 `openai_responses` 协议回放；其余
+    /// 适配器一律忽略本变体。
+    ReasoningItem {
+        model: String,
+        item: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,6 +338,15 @@ pub struct GeneratedImageData {
     pub data: String,
 }
 
+/// 一只随消息存续的 Responses reasoning item（见 [`MessagePart::ReasoningItem`]）。
+/// 在 openai 兼容消息 JSON 上以自定义键 `reasoning_items` 数组承载（同 Gemini
+/// `thought_signature` 的搭车方式），经存储/回放往返不丢。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderReasoningItem {
+    pub model: String,
+    pub item: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateOutput {
     pub text: String,
@@ -340,6 +364,11 @@ pub struct GenerateOutput {
     /// 绝大多数调用不出图。runtime 据此把图落地为 assistant 消息 artifact。
     #[serde(default)]
     pub images: Vec<GeneratedImageData>,
+    /// OpenAI Responses 的原生 reasoning items（含 encrypted_content），仅该适配器
+    /// 填充；随 `to_openai_compatible_message` 挂到 `reasoning_items` 键上进入历史，
+    /// 下一轮由 responses 适配器回放（见 [`MessagePart::ReasoningItem`]）。
+    #[serde(default)]
+    pub reasoning_items: Vec<ProviderReasoningItem>,
 }
 
 impl GenerateOutput {
@@ -354,6 +383,7 @@ impl GenerateOutput {
             cancelled: false,
             web_search: None,
             images: Vec::new(),
+            reasoning_items: Vec::new(),
         }
     }
 
@@ -368,6 +398,7 @@ impl GenerateOutput {
             cancelled: true,
             web_search: None,
             images: Vec::new(),
+            reasoning_items: Vec::new(),
         }
     }
 
@@ -402,6 +433,11 @@ impl GenerateOutput {
                     })
                     .collect(),
             );
+        }
+        if !self.reasoning_items.is_empty() {
+            if let Ok(items) = serde_json::to_value(&self.reasoning_items) {
+                message["reasoning_items"] = items;
+            }
         }
         message
     }
@@ -763,6 +799,14 @@ pub fn openai_messages_from_generate_request(request: &GenerateRequest) -> Vec<V
     for message in &request.messages {
         messages.extend(openai_messages_from_model_message(message));
     }
+    // 这是 Chat Completions 的**发送**路径：`reasoning_items` 是 Responses 专属的
+    // 存续键（密文可达几 KB/轮），发给 Chat Completions 端点纯属浪费、严格端点还可能
+    // 400。存储路径（openai_messages_from_model_messages）保留该键。
+    for message in &mut messages {
+        if let Some(obj) = message.as_object_mut() {
+            obj.remove("reasoning_items");
+        }
+    }
     messages
 }
 
@@ -828,6 +872,24 @@ fn model_message_from_openai_message(message: &Value) -> Option<ModelMessage> {
             role,
             content: parts,
         });
+    }
+    // Responses 原生 reasoning items（自定义键搭车，见 MessagePart::ReasoningItem）。
+    // 放在 parts 头部：原生输出顺序就是 reasoning → message → function_call。
+    if let Some(items) = message.get("reasoning_items").and_then(Value::as_array) {
+        for entry in items {
+            let model = entry
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(item) = entry.get("item") {
+                if !item.is_null() {
+                    parts.push(MessagePart::ReasoningItem {
+                        model: model.to_string(),
+                        item: item.clone(),
+                    });
+                }
+            }
+        }
     }
     if let Some(content) = message.get("content") {
         match content {
@@ -955,6 +1017,7 @@ fn openai_messages_from_model_message(message: &ModelMessage) -> Vec<Value> {
     let mut multimodal_parts = Vec::new();
     let mut tool_calls = Vec::new();
     let mut reasoning: Option<String> = None;
+    let mut reasoning_items: Vec<Value> = Vec::new();
     for part in &message.content {
         match part {
             MessagePart::Text { text } => {
@@ -1007,6 +1070,9 @@ fn openai_messages_from_model_message(message: &ModelMessage) -> Vec<Value> {
             MessagePart::Reasoning { text } => {
                 reasoning = Some(text.clone());
             }
+            MessagePart::ReasoningItem { model, item } => {
+                reasoning_items.push(serde_json::json!({ "model": model, "item": item }));
+            }
             MessagePart::ToolResult { .. } => {}
         }
     }
@@ -1030,6 +1096,9 @@ fn openai_messages_from_model_message(message: &ModelMessage) -> Vec<Value> {
     if let Some(reasoning) = reasoning {
         out["reasoning_content"] = Value::String(reasoning);
     }
+    if !reasoning_items.is_empty() {
+        out["reasoning_items"] = Value::Array(reasoning_items);
+    }
     vec![out]
 }
 
@@ -1047,15 +1116,26 @@ fn parse_data_image_url(url: &str) -> Option<(String, String)> {
 /// messages). User/assistant text use `input_text` / `output_text` content parts, and
 /// user images use `input_image`. Mirrors `openai_messages_from_model_message` but for
 /// the Responses item shapes. (System text is carried separately as `instructions`.)
-pub fn responses_input_from_model_messages(messages: &[ModelMessage]) -> Vec<Value> {
+/// `reasoning_replay`：`Some(当前请求模型)` = 回放历史里同模型的原生 reasoning items
+/// （openai_responses；思维链跨轮延续的关键），`None` = 不回放（xAI：types 回放一直
+/// 丢弃推理项；或该端点已被学习为不支持回放）。只回放 `model` 完全一致的 item——
+/// encrypted_content 是模型键控的，会话中途换模型后旧密文送回去必 400。
+pub fn responses_input_from_model_messages(
+    messages: &[ModelMessage],
+    reasoning_replay: Option<&str>,
+) -> Vec<Value> {
     let mut items = Vec::new();
     for message in messages {
-        responses_items_from_model_message(message, &mut items);
+        responses_items_from_model_message(message, reasoning_replay, &mut items);
     }
     items
 }
 
-fn responses_items_from_model_message(message: &ModelMessage, items: &mut Vec<Value>) {
+fn responses_items_from_model_message(
+    message: &ModelMessage,
+    reasoning_replay: Option<&str>,
+    items: &mut Vec<Value>,
+) {
     if message.role == ModelRole::Tool {
         for part in &message.content {
             if let MessagePart::ToolResult {
@@ -1084,6 +1164,10 @@ fn responses_items_from_model_message(message: &ModelMessage, items: &mut Vec<Va
     // Tool calls are sibling items, emitted AFTER the assistant's text content so the
     // ordering matches a natural turn (message, then the calls it made).
     let mut tool_call_items: Vec<Value> = Vec::new();
+    // Reasoning items are emitted FIRST (native output order: reasoning → message →
+    // function_call); the API validates that a replayed reasoning item precedes the
+    // items it produced.
+    let mut reasoning_items: Vec<Value> = Vec::new();
 
     for part in &message.content {
         match part {
@@ -1123,11 +1207,19 @@ fn responses_items_from_model_message(message: &ModelMessage, items: &mut Vec<Va
                     "arguments": arguments_raw,
                 }));
             }
-            // Reasoning is omitted on replay; ToolResult only appears on Tool messages.
+            MessagePart::ReasoningItem { model, item } => {
+                // 只回放同模型的 item（密文模型键控）；未启用回放时整类忽略。
+                if reasoning_replay == Some(model.as_str()) {
+                    reasoning_items.push(item.clone());
+                }
+            }
+            // Reasoning summary text is omitted on replay (the native item carries the
+            // real chain); ToolResult only appears on Tool messages.
             MessagePart::Reasoning { .. } | MessagePart::ToolResult { .. } => {}
         }
     }
 
+    items.extend(reasoning_items);
     if !content_parts.is_empty() {
         items.push(serde_json::json!({
             "role": message.role.as_str(),
@@ -1308,7 +1400,7 @@ MCP note after the path.";
                 }],
             },
         ];
-        let items = responses_input_from_model_messages(&messages);
+        let items = responses_input_from_model_messages(&messages, None);
 
         // user message → role item with input_text
         assert_eq!(items[0]["role"], "user");
@@ -1327,6 +1419,109 @@ MCP note after the path.";
     }
 
     #[test]
+    fn reasoning_items_survive_openai_message_round_trip() {
+        // Responses 原生 reasoning item 经 openai 兼容消息（存储形态）↔ ModelMessage
+        // 的双向转换都不能丢——丢一环，思维链回放就断在那一环。
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": Value::Null,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "read", "arguments": "{\"path\":\"a.png\"}" }
+            }],
+            "reasoning_items": [{
+                "model": "gpt-5.6",
+                "item": { "type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAA" }
+            }]
+        });
+        let model_messages = model_messages_from_openai_messages(vec![message]);
+        assert_eq!(model_messages.len(), 1);
+        let part = model_messages[0]
+            .content
+            .iter()
+            .find_map(|part| match part {
+                MessagePart::ReasoningItem { model, item } => Some((model.clone(), item.clone())),
+                _ => None,
+            })
+            .expect("reasoning item part");
+        assert_eq!(part.0, "gpt-5.6");
+        assert_eq!(part.1["id"], "rs_1");
+
+        let back = openai_messages_from_model_messages(&model_messages);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0]["reasoning_items"][0]["model"], "gpt-5.6");
+        assert_eq!(back[0]["reasoning_items"][0]["item"]["id"], "rs_1");
+        assert_eq!(
+            back[0]["reasoning_items"][0]["item"]["encrypted_content"],
+            "gAAA"
+        );
+    }
+
+    #[test]
+    fn chat_completions_wire_path_strips_reasoning_items() {
+        // Responses 专属键不上 Chat Completions 的线（存储路径保留，见上个测试）。
+        let request = GenerateRequest {
+            model: "m".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::Assistant,
+                content: vec![
+                    MessagePart::Text { text: "ok".into() },
+                    MessagePart::ReasoningItem {
+                        model: "gpt-5.6".into(),
+                        item: serde_json::json!({ "type": "reasoning", "id": "rs_1", "encrypted_content": "gAAA" }),
+                    },
+                ],
+            }],
+            tools: Vec::new(),
+            options: Default::default(),
+            metadata: Default::default(),
+        };
+        let messages = openai_messages_from_generate_request(&request);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].get("reasoning_items").is_none());
+    }
+
+    #[test]
+    fn responses_input_replays_matching_reasoning_items_before_calls() {
+        let messages = vec![ModelMessage {
+            role: ModelRole::Assistant,
+            content: vec![
+                MessagePart::ReasoningItem {
+                    model: "gpt-5.6".to_string(),
+                    item: serde_json::json!({
+                        "type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAA"
+                    }),
+                },
+                MessagePart::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "a.png" }),
+                    arguments_raw: "{\"path\":\"a.png\"}".to_string(),
+                    signature: None,
+                },
+            ],
+        }];
+
+        // 同模型回放：reasoning item 在 function_call 之前（原生输出顺序）。
+        let items = responses_input_from_model_messages(&messages, Some("gpt-5.6"));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["id"], "rs_1");
+        assert_eq!(items[0]["encrypted_content"], "gAAA");
+        assert_eq!(items[1]["type"], "function_call");
+
+        // 模型不匹配（会话中途换模型）：密文是模型键控的，必须跳过。
+        let items = responses_input_from_model_messages(&messages, Some("gpt-6"));
+        assert!(items.iter().all(|item| item["type"] != "reasoning"));
+
+        // 未启用回放（xAI / 端点已学习为不支持）：整类不发。
+        let items = responses_input_from_model_messages(&messages, None);
+        assert!(items.iter().all(|item| item["type"] != "reasoning"));
+    }
+
+    #[test]
     fn responses_input_maps_user_image_to_input_image() {
         let messages = vec![ModelMessage {
             role: ModelRole::User,
@@ -1339,7 +1534,7 @@ MCP note after the path.";
                 },
             ],
         }];
-        let items = responses_input_from_model_messages(&messages);
+        let items = responses_input_from_model_messages(&messages, None);
         assert_eq!(items.len(), 1);
         let content = items[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "input_image");

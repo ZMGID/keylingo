@@ -25,8 +25,8 @@ use crate::usage::{
 use super::{
     parse_tool_arguments, responses_input_from_model_messages, stream_read_error, BuiltinWebSearch,
     FirstTokenStreamSink, GenerateOutput, GenerateRequest, GeneratedImageData,
-    LanguageModelProvider, ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart,
-    StreamSink, WebCitation,
+    LanguageModelProvider, ModelError, ModelFuture, ModelUsage, PendingToolCall,
+    ProviderReasoningItem, StreamPart, StreamSink, WebCitation,
 };
 
 /// UI 档位 → xAI 官方 effort。
@@ -122,6 +122,15 @@ impl OpenAiResponsesProvider<'_> {
                 self.state
                     .mark_prompt_cache_retention_unsupported(&self.provider.base_url);
                 learned = true;
+            } else if body_replays_reasoning_items(&body)
+                && error_maybe_rejects_reasoning_replay(err)
+            {
+                // 有些中转不实现 stateless reasoning 回放（对 input 里的 reasoning item
+                // 直接 4xx）。学习后本会话不再对该 base_url 回放——去掉 item 的请求永远
+                // 合法，所以这条重试是严格安全的降级（回到修复前的行为）。
+                self.state
+                    .mark_reasoning_replay_unsupported(&self.provider.base_url);
+                learned = true;
             }
             if learned {
                 let retry_body = self.request_body(request, stream);
@@ -207,7 +216,8 @@ impl OpenAiResponsesProvider<'_> {
         })?;
         match serde_json::from_str::<Value>(&raw) {
             Ok(value) => {
-                let output = output_from_responses(&value, &raw, &label)?;
+                let mut output = output_from_responses(&value, &raw, &label)?;
+                stamp_reasoning_item_model(&mut output, &request.model);
                 self.record_usage_success(
                     &request,
                     &label,
@@ -255,7 +265,8 @@ impl OpenAiResponsesProvider<'_> {
                     return Err(ModelError::new(message));
                 }
                 match output_from_sse_body(&raw) {
-                    Ok(output) => {
+                    Ok(mut output) => {
+                        stamp_reasoning_item_model(&mut output, &request.model);
                         self.record_usage_success(
                             &request,
                             &label,
@@ -325,7 +336,10 @@ impl OpenAiResponsesProvider<'_> {
 
         let mut buffer = String::new();
         let mut utf8 = crate::api::Utf8StreamDecoder::default();
-        let mut state = ResponsesStreamState::default();
+        let mut state = ResponsesStreamState {
+            model: request.model.clone(),
+            ..Default::default()
+        };
 
         loop {
             let chunk = response.chunk().await.map_err(|err| {
@@ -419,9 +433,17 @@ impl OpenAiResponsesProvider<'_> {
         // 协议来自用户在设置里选的「Grok (xAI)」，不是猜 base_url——中转站可以把 grok
         // 挂在任意域名上，靠域名判断必然漏。
         let is_xai = self.provider.api_format_kind() == ProviderApiFormat::XaiResponses;
+        // 历史里的原生 reasoning item 随 input 回放（Codex 同款；思维链跨工具轮延续的
+        // 关键）。xAI 不回放（types 的回放一直丢弃推理项，且我们不向它要密文）；被学习为
+        // 「该端点不认回放」的 base_url 也跳过（send_responses_body 的 4xx 兜底会写入）。
+        let reasoning_replay = (!is_xai
+            && !self
+                .state
+                .reasoning_replay_unsupported(&self.provider.base_url))
+        .then_some(request.model.as_str());
         let mut body = serde_json::json!({
             "model": request.model,
-            "input": responses_input_from_model_messages(&request.messages),
+            "input": responses_input_from_model_messages(&request.messages, reasoning_replay),
         });
         if let Some(temperature) = crate::chat::model_metadata::temperature_for_request(
             request.options.temperature,
@@ -749,6 +771,11 @@ struct ResponsesToolPartial {
 struct ResponsesStreamState {
     text: String,
     reasoning: String,
+    /// 本次请求的模型名，随 reasoning item 落进历史（回放前校验同模型，密文模型键控）。
+    model: String,
+    /// 原生 reasoning items（带 encrypted_content 才收）。回放它们是 gpt-5 系在
+    /// 工具循环里保持思维链连续的关键（Codex 官方客户端同款做法）。
+    reasoning_items: Vec<Value>,
     tool_calls: Vec<ResponsesToolPartial>,
     finish_reason: Option<String>,
     usage: Option<ModelUsage>,
@@ -892,6 +919,7 @@ impl ResponsesStreamState {
                 citations: ws.citations.clone(),
             })?;
         }
+        let model = self.model;
         Ok(GenerateOutput {
             text: self.text,
             reasoning: non_empty(self.reasoning),
@@ -902,8 +930,43 @@ impl ResponsesStreamState {
             cancelled: false,
             web_search: self.web_search,
             images: self.images,
+            reasoning_items: self
+                .reasoning_items
+                .into_iter()
+                .map(|item| ProviderReasoningItem {
+                    model: model.clone(),
+                    item,
+                })
+                .collect(),
         })
     }
+}
+
+/// 一只 reasoning item 是否值得存下来回放：必须带非空 `encrypted_content`。
+fn reasoning_item_replayable(item: &Value) -> bool {
+    item.get("encrypted_content")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// 请求体的 `input` 里是否带了回放的 reasoning item（学习兜底的触发前提）。
+fn body_replays_reasoning_items(body: &Value) -> bool {
+    body.get("input").and_then(Value::as_array).is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+    })
+}
+
+/// 该错误是否可能是端点拒绝 reasoning 回放。各家中转的 4xx 文案千奇百怪，无法可靠
+/// 模式匹配，所以宽松地认所有请求级 4xx（400/404/422）：误判的代价只是该端点本会话
+/// 退回「不回放」（= 修复前的行为），而漏判的代价是对话每轮 4xx 直接不可用。
+/// 401/402/403/429 是 key/配额问题，归 failover 管，不在此列。
+fn error_maybe_rejects_reasoning_replay(err: &str) -> bool {
+    matches!(
+        crate::api::extract_status_code(err),
+        Some(400) | Some(404) | Some(422)
+    )
 }
 
 /// 从一个 `image_generation_call` output item 取出生成的图。`result` 是裸 base64
@@ -1080,6 +1143,14 @@ fn handle_responses_stream_event(
                             state.images.push(image);
                         }
                     }
+                    // 原生 reasoning item：带 encrypted_content 才值得收（无密文的 item
+                    // 在 store:false 下回放会被当服务端引用查找而 404）。整只原样保存，
+                    // 回放时随 input 送回 —— 思维链跨工具轮延续的唯一载体。
+                    Some("reasoning") => {
+                        if reasoning_item_replayable(item) {
+                            state.reasoning_items.push(item.clone());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1117,6 +1188,23 @@ fn handle_responses_stream_event(
                         }
                         for c in extra.citations {
                             state.push_web_search_citation(&c.url, &c.title);
+                        }
+                    }
+                    // reasoning items 兜底：有些网关只在 completed 的完整 output 里带
+                    // encrypted_content（output_item.done 里缺）。按 id 去重合并。
+                    for item in output {
+                        if item.get("type").and_then(Value::as_str) == Some("reasoning")
+                            && reasoning_item_replayable(item)
+                        {
+                            let id = item.get("id").and_then(Value::as_str);
+                            let seen = id.is_some_and(|id| {
+                                state.reasoning_items.iter().any(|existing| {
+                                    existing.get("id").and_then(Value::as_str) == Some(id)
+                                })
+                            });
+                            if !seen {
+                                state.reasoning_items.push(item.clone());
+                            }
                         }
                     }
                 }
@@ -1240,6 +1328,7 @@ pub fn output_from_responses(
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut images = Vec::new();
+    let mut reasoning_items: Vec<Value> = Vec::new();
     for item in output {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
@@ -1287,6 +1376,13 @@ pub fn output_from_responses(
                     images.push(image);
                 }
             }
+            // 原生 reasoning item：带密文才收（回放思维链用）。model 由调用方
+            // （generate_inner）统一盖戳——本函数拿不到请求模型。
+            Some("reasoning") => {
+                if reasoning_item_replayable(item) {
+                    reasoning_items.push(item.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -1312,7 +1408,25 @@ pub fn output_from_responses(
         cancelled: false,
         web_search: web_search_from_responses_output(output),
         images,
+        reasoning_items: reasoning_items
+            .into_iter()
+            .map(|item| ProviderReasoningItem {
+                model: String::new(),
+                item,
+            })
+            .collect(),
     })
+}
+
+/// 非流式/SSE 兜底解析拿不到请求模型，reasoning item 的 `model` 先留空；
+/// 调用方在拿到 `GenerateOutput` 后用请求模型统一盖戳（空 model 的 item 回放时
+/// 永远匹配不上任何请求模型，等于被静默丢弃——所以漏盖戳只是少回放，不会错回放）。
+fn stamp_reasoning_item_model(output: &mut GenerateOutput, model: &str) {
+    for entry in &mut output.reasoning_items {
+        if entry.model.is_empty() {
+            entry.model = model.to_string();
+        }
+    }
 }
 
 /// 把 grok(xAI) `web_search_call.action.sources[]` 的单项解析成 `WebCitation`。
@@ -2001,6 +2115,186 @@ mod tests {
         let output = output_from_responses(&value, "{}", "test").expect("output");
         assert_eq!(output.images.len(), 1);
         assert_eq!(output.images[0].mime_type, "image/jpeg");
+    }
+
+    #[test]
+    fn stream_reasoning_items_with_encrypted_content_are_captured() {
+        // 带密文的 reasoning item 要整只收下（回放思维链）；没有密文的不收——
+        // store:false 下回放无密文 item 会被服务端当引用查找而报错。completed 里
+        // 重现的同 id item 按 id 去重，不重复收。
+        let (_parts, output) = run_events(&[
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": { "id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "gAAA" }
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": { "id": "rs_2", "type": "reasoning", "summary": [] }
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": { "status": "completed", "output": [
+                    { "id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "gAAA" },
+                    { "type": "message", "content": [{ "type": "output_text", "text": "ok" }] }
+                ] }
+            }),
+        ]);
+        assert_eq!(output.reasoning_items.len(), 1, "只收带密文的，且按 id 去重");
+        assert_eq!(output.reasoning_items[0].item["id"], "rs_1");
+        assert_eq!(output.reasoning_items[0].item["encrypted_content"], "gAAA");
+    }
+
+    #[test]
+    fn nonstream_reasoning_items_are_captured_and_model_stamped() {
+        let value = serde_json::json!({
+            "status": "completed",
+            "output": [
+                { "id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "gAAA" },
+                { "type": "message", "content": [{ "type": "output_text", "text": "hi" }] }
+            ]
+        });
+        let mut output = output_from_responses(&value, "{}", "test").expect("output");
+        assert_eq!(output.reasoning_items.len(), 1);
+        assert_eq!(output.reasoning_items[0].model, "", "解析层拿不到请求模型");
+        stamp_reasoning_item_model(&mut output, "gpt-5.6");
+        assert_eq!(output.reasoning_items[0].model, "gpt-5.6");
+    }
+
+    fn replay_request_body(
+        state: &crate::state::AppState,
+        api_format: &str,
+        part_model: &str,
+        request_model: &str,
+    ) -> Value {
+        let provider = ModelProvider {
+            id: "test".into(),
+            name: "Test".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            base_url: "https://relay.example.com/v1".into(),
+            available_models: vec![request_model.into()],
+            enabled_models: vec![request_model.into()],
+            enabled: true,
+            api_format: api_format.into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+            active_key_index: 0,
+        };
+        let request = GenerateRequest {
+            model: request_model.into(),
+            system: String::new(),
+            messages: vec![
+                ModelMessage::text(ModelRole::User, "看下这张图"),
+                ModelMessage {
+                    role: ModelRole::Assistant,
+                    content: vec![
+                        MessagePart::ReasoningItem {
+                            model: part_model.into(),
+                            item: serde_json::json!({
+                                "type": "reasoning", "id": "rs_1", "summary": [],
+                                "encrypted_content": "gAAA"
+                            }),
+                        },
+                        MessagePart::ToolCall {
+                            id: "call_1".into(),
+                            name: "read".into(),
+                            arguments: serde_json::json!({ "path": "a.png" }),
+                            arguments_raw: "{\"path\":\"a.png\"}".into(),
+                            signature: None,
+                        },
+                    ],
+                },
+                ModelMessage {
+                    role: ModelRole::Tool,
+                    content: vec![MessagePart::ToolResult {
+                        tool_call_id: "call_1".into(),
+                        content: "图片内容描述".into(),
+                        is_error: false,
+                        artifacts: Vec::new(),
+                    }],
+                },
+            ],
+            tools: Vec::new(),
+            options: Default::default(),
+            metadata: Default::default(),
+        };
+        OpenAiResponsesProvider::new(state, &provider, 1).request_body(&request, false)
+    }
+
+    fn fresh_state() -> crate::state::AppState {
+        crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        )
+    }
+
+    #[test]
+    fn request_body_replays_matching_reasoning_items_in_native_order() {
+        let state = fresh_state();
+        let body = replay_request_body(&state, "openai_responses", "gpt-5.6", "gpt-5.6");
+        let input = body["input"].as_array().unwrap();
+        // user → reasoning → function_call → function_call_output
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_1");
+        assert_eq!(input[1]["encrypted_content"], "gAAA");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[3]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn request_body_skips_reasoning_items_on_model_switch_and_xai() {
+        // 会话中途换模型：旧密文别的模型解不开，回放必 400 → 跳过。
+        let state = fresh_state();
+        let body = replay_request_body(&state, "openai_responses", "gpt-5.6", "gpt-6");
+        let input = body["input"].as_array().unwrap();
+        assert!(input.iter().all(|item| item["type"] != "reasoning"));
+
+        // xAI：types 的回放一直丢弃推理项，且我们不向它要密文。
+        let body = replay_request_body(&state, "xai_responses", "grok-4.3", "grok-4.3");
+        let input = body["input"].as_array().unwrap();
+        assert!(input.iter().all(|item| item["type"] != "reasoning"));
+    }
+
+    #[test]
+    fn learned_unsupported_endpoint_stops_replaying_reasoning_items() {
+        let state = fresh_state();
+        state.mark_reasoning_replay_unsupported("https://relay.example.com/v1");
+        let body = replay_request_body(&state, "openai_responses", "gpt-5.6", "gpt-5.6");
+        let input = body["input"].as_array().unwrap();
+        assert!(
+            input.iter().all(|item| item["type"] != "reasoning"),
+            "已学习为不支持的端点不再回放: {body}"
+        );
+    }
+
+    #[test]
+    fn reasoning_replay_learning_triggers_only_on_request_level_4xx() {
+        let body_with_replay = serde_json::json!({
+            "input": [{ "type": "reasoning", "id": "rs_1", "encrypted_content": "gAAA" }]
+        });
+        assert!(body_replays_reasoning_items(&body_with_replay));
+        assert!(!body_replays_reasoning_items(
+            &serde_json::json!({ "input": [{ "role": "user", "content": [] }] })
+        ));
+
+        // 错误串遵循 api.rs 的约定格式 `"{label} Error: {status} - {body}"`。
+        assert!(error_maybe_rejects_reasoning_replay(
+            "Responses stream Error: 400 Bad Request - invalid item rs_1"
+        ));
+        // 401/429 是 key/配额问题，归 failover；5xx 是服务端问题——都不该学习。
+        assert!(!error_maybe_rejects_reasoning_replay(
+            "Responses stream Error: 401 Unauthorized - bad key"
+        ));
+        assert!(!error_maybe_rejects_reasoning_replay(
+            "Responses stream Error: 429 Too Many Requests - slow down"
+        ));
+        assert!(!error_maybe_rejects_reasoning_replay(
+            "Responses stream Error: 502 Bad Gateway - upstream"
+        ));
+        // 网络错误无状态码 → 不学习。
+        assert!(!error_maybe_rejects_reasoning_replay("connection reset by peer"));
     }
 
     #[test]

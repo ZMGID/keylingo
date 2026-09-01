@@ -389,7 +389,7 @@ pub fn format_exported_paths(exports: &[SandboxExportedArtifact]) -> String {
         return String::new();
     }
     let mut lines = vec![
-        "generated files (saved to the current workbench and registered as artifacts; use their returned artifact IDs with present_artifacts to show selected files in chat):"
+        "generated files (saved to the current workbench and registered as artifacts; copy their art_ ids into present_artifacts to show selected files in chat — never file contents):"
             .to_string(),
     ];
     for export in exports {

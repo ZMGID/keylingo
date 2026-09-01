@@ -452,7 +452,7 @@ pub fn native_run_command_tool() -> ChatToolDefinition {
                 "command": { "type": "string", "description": "Shell command" },
                 "cwd": { "type": "string", "description": "Working directory (required when the path contains spaces; do not use `cd ... &&` for that)" },
                 "background": { "type": "boolean", "description": "Run in background and return immediately (auto-enabled for common dev servers)" },
-                "timeout_ms": { "type": "integer", "description": "Timeout in ms (optional)" },
+                "timeout_ms": { "type": "integer", "description": "Foreground timeout in ms (optional, max 600000). Prefer a longer timeout over background:true for finite batch jobs." },
                 "allow_host_python_package_install": { "type": "boolean", "description": "Only true when the user explicitly asked to modify the host Python environment; installs must use --user or a virtual environment." }
             },
             "required": ["command"]
@@ -467,7 +467,7 @@ pub fn native_bash_output_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__bash_output".to_string(),
         name: "bash_output".to_string(),
-        description: "Inspect background commands started by bash (background:true). With a job_id: returns that job's captured stdout/stderr since since_offset (default 0), the current status (running / exited with exit_code / killed / error), and next_offset for incremental reads. With NO job_id: lists all background commands tracked in this app session (job_id, status, command, working directory, age) — background commands survive across turns until killed or the app exits. After dispatching a background command, do NOT poll immediately — keep working, then poll a bounded number of times (≤20). Always refresh once with bash_output before reporting a background command's result to the user.".to_string(),
+        description: "Inspect background commands started by bash (background:true). With a job_id: waits for new stdout/stderr since since_offset (default 0), process exit, or wait_ms (default 30000; 0 = return immediately), then returns that output, status (running / exited with exit_code / killed / error), and next_offset for incremental reads. Do not poll in a tight loop — one call already waits. With NO job_id: lists all background commands tracked in this app session (job_id, status, command, working directory, age) — background commands survive across turns until killed or the app exits. Always refresh once with bash_output before reporting a background command's result to the user.".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -475,7 +475,8 @@ pub fn native_bash_output_tool() -> ChatToolDefinition {
             "type": "object",
             "properties": {
                 "job_id": { "type": "string", "description": "The job_id returned when the background command was started. Omit to list all tracked background jobs instead." },
-                "since_offset": { "type": "integer", "description": "Byte offset to read from (use next_offset from the previous bash_output call for incremental reads; default 0)" }
+                "since_offset": { "type": "integer", "description": "Byte offset to read from (use next_offset from the previous bash_output call for incremental reads; default 0)" },
+                "wait_ms": { "type": "integer", "description": "How long to wait for new output or exit before returning (default 30000). 0 returns a snapshot immediately. Capped at the tool timeout." }
             }
         }),
         sensitive: false,
@@ -532,11 +533,15 @@ pub fn native_save_assistant_tool() -> ChatToolDefinition {
     }
 }
 
+/// `present_artifacts` only takes id/path strings. Models sometimes dump
+/// base64 or file contents into the argument stream; abort past this.
+pub const PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS: usize = 8_192;
+
 pub fn native_present_artifacts_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__present_artifacts".to_string(),
         name: "present_artifacts".to_string(),
-        description: "Show files or images in the chat. You must call this when the user asks to show, preview, attach, or send a file; reading or describing a file does not display it. Pass artifact_ids for files this conversation generated, or paths for files that already exist on disk — never both for the same file, and never invent a path for a generated file. Unselected files remain hidden.".to_string(),
+        description: "Show files or images in the chat. Call this when the user should see a file; reading or describing it does not display it. Pass only a short JSON of identifiers: copy `art_…` ids from tool results into artifact_ids, or pass existing disk paths. Never both for the same file. Never invent a path for a generated file. Never put file contents, image bytes, base64, or data URLs in any field. Caption is optional plain text. Max 16 files. Unselected files stay hidden. Example: {\"artifact_ids\":[\"art_…\"]}".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -545,21 +550,21 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
             "properties": {
                 "artifact_ids": {
                     "type": "array",
-                    "description": "IDs of files generated in this conversation (e.g. images from mixer_generate_image). These have no filesystem path — do not also list them in paths.",
+                    "description": "Copy `art_…` ids from tool results verbatim. Short strings only — not file names, paths, bytes, base64, or data URLs. Generated files have these ids and no usable path.",
                     "items": { "type": "string", "minLength": 1 },
                     "minItems": 1,
                     "maxItems": 16
                 },
                 "paths": {
                     "type": "array",
-                    "description": "Paths of files that already exist on disk. Only for files you read or wrote yourself; never for generated artifacts.",
+                    "description": "Existing disk paths for files you already read or wrote. Do not use for generated artifacts (those use artifact_ids). Never file contents.",
                     "items": { "type": "string", "minLength": 1 },
                     "minItems": 1,
                     "maxItems": 16
                 },
                 "caption": {
                     "type": "string",
-                    "description": "Optional short caption",
+                    "description": "Optional plain-text caption (max 300 chars). Not for file contents or base64.",
                     "maxLength": 300
                 }
             },
@@ -1131,6 +1136,29 @@ mod tests {
             def.description.len() < 500,
             "upsert description grew to {} chars",
             def.description.len()
+        );
+    }
+
+    #[test]
+    fn present_artifacts_tool_tells_model_to_pass_ids_only() {
+        let def = native_present_artifacts_tool();
+        assert!(
+            def.description.contains(r#"{"artifact_ids":["art_…"]}"#),
+            "{}",
+            def.description
+        );
+        assert!(def.description.contains("base64"), "{}", def.description);
+        assert!(
+            def.input_schema["properties"]["artifact_ids"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("`art_…`"),
+        );
+        assert!(
+            def.input_schema["properties"]["caption"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("plain-text"),
         );
     }
 

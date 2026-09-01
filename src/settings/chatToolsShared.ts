@@ -8,7 +8,9 @@ export const CHAT_TOOL_LEGACY_DEFAULT_ROUNDS = 20
 export const CHAT_TOOL_MIN_ROUNDS = 1
 export const CHAT_TOOL_MAX_ROUNDS = 100
 export const CHAT_TOOL_ROUND_PRESETS = [5, 10, 20, 50, 100]
-export const CHAT_TOOL_TIMEOUT_PRESETS_MS = [30_000, 60_000, 120_000, 300_000]
+export const CHAT_TOOL_TIMEOUT_PRESETS_MS = [30_000, 60_000, 120_000, 300_000, 600_000]
+export const CHAT_TOOL_MIN_TIMEOUT_MS = 1_000
+export const CHAT_TOOL_MAX_TIMEOUT_MS = 600_000
 // MCP 持久连接空闲超时预设（ms）。后端钳制范围 60s..24h，默认 10 分钟。
 export const MCP_IDLE_TIMEOUT_PRESETS_MS = [60_000, 300_000, 600_000, 1_800_000, 3_600_000]
 export const MCP_IDLE_TIMEOUT_MIN_MS = 60_000
@@ -27,7 +29,7 @@ export function clampToolRounds(value: string | number | null | undefined): numb
 export function clampToolTimeoutMs(value: string | number | null | undefined): number {
   const parsed = Number(value ?? 60_000)
   if (!Number.isFinite(parsed)) return 60_000
-  return Math.min(300_000, Math.max(1_000, Math.round(parsed)))
+  return Math.min(CHAT_TOOL_MAX_TIMEOUT_MS, Math.max(CHAT_TOOL_MIN_TIMEOUT_MS, Math.round(parsed)))
 }
 
 export function clampMcpIdleTimeoutMs(value: string | number | null | undefined): number {

@@ -994,6 +994,7 @@ pub fn output_from_anthropic_message(
         cancelled: false,
         web_search: parsed.web_search,
         images: Vec::new(),
+        reasoning_items: Vec::new(),
     })
 }
 
@@ -1379,6 +1380,8 @@ fn anthropic_content_blocks(message: &ModelMessage, role: ModelRole) -> Vec<Valu
                     }));
                 }
             }
+            // OpenAI Responses 专属的原生推理项：其它协议不识别，回放时忽略。
+            MessagePart::ReasoningItem { .. } => {}
         }
     }
     if blocks.is_empty() {
@@ -1528,6 +1531,7 @@ fn stream_output(
         cancelled: false,
         web_search: None,
         images: Vec::new(),
+        reasoning_items: Vec::new(),
     }
 }
 

@@ -10,6 +10,7 @@ use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
     ToolCallStatus,
 };
+use crate::mcp::types::PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS;
 use crate::mcp::ChatToolDefinition;
 
 use super::finalize::{build_web_search_record, build_web_search_segment};
@@ -450,19 +451,34 @@ impl<'a> AgentStreamSink<'a> {
         );
     }
 
-    fn emit_tool_call_delta(&mut self, id: String, delta: String) {
+    fn emit_tool_call_delta(&mut self, id: String, delta: String) -> Result<(), ModelError> {
         let Some(tracker) = self.tool_draft_tracker.as_ref() else {
-            return;
+            return Ok(());
         };
         let record_to_emit = {
             let mut guard = tracker.inner.lock().unwrap_or_else(|err| err.into_inner());
             let Some(draft) = guard.drafts.iter_mut().find(|draft| draft.record.id == id) else {
-                return;
+                return Ok(());
             };
+            if let Some(limit) = compact_tool_argument_limit(&draft.model_name) {
+                let next = draft
+                    .arguments_raw
+                    .chars()
+                    .count()
+                    .saturating_add(delta.chars().count());
+                if next > limit {
+                    return Err(ModelError::new(oversized_tool_arguments_error(
+                        &draft.model_name,
+                    )));
+                }
+            }
             draft.arguments_raw.push_str(&delta);
+            if compact_tool_argument_limit(&draft.model_name).is_some() {
+                return Ok(());
+            }
             let chars = draft.arguments_raw.chars().count();
             if chars == 0 || chars.saturating_sub(draft.last_emitted_argument_chars) < 2048 {
-                return;
+                return Ok(());
             }
             draft.last_emitted_argument_chars = chars;
             draft.record.arguments =
@@ -487,11 +503,19 @@ impl<'a> AgentStreamSink<'a> {
                 &record,
             );
         }
+        Ok(())
     }
 
-    fn emit_tool_call_done(&mut self, call: &PendingToolCall) {
+    fn emit_tool_call_done(&mut self, call: &PendingToolCall) -> Result<(), ModelError> {
+        if let Some(limit) = compact_tool_argument_limit(&call.function_name) {
+            if call.arguments_raw.chars().count() > limit {
+                return Err(ModelError::new(oversized_tool_arguments_error(
+                    &call.function_name,
+                )));
+            }
+        }
         let Some(tracker) = self.tool_draft_tracker.as_ref() else {
-            return;
+            return Ok(());
         };
         let record_to_emit = {
             let mut guard = tracker.inner.lock().unwrap_or_else(|err| err.into_inner());
@@ -500,7 +524,7 @@ impl<'a> AgentStreamSink<'a> {
                 .iter_mut()
                 .find(|draft| draft.record.id == call.id)
             else {
-                return;
+                return Ok(());
             };
             draft.done = true;
             draft.arguments_raw = call.arguments_raw.clone();
@@ -527,6 +551,7 @@ impl<'a> AgentStreamSink<'a> {
                 &record,
             );
         }
+        Ok(())
     }
 
     /// 消费一帧内置搜索增量（任务 07-23）：无 tracker（非内置模式）直接忽略——保证
@@ -587,8 +612,8 @@ impl StreamSink for AgentStreamSink<'_> {
             }
             StreamPart::Error { message } => return Err(ModelError::new(message)),
             StreamPart::ToolCallStart { id, name } => self.emit_tool_call_start(id, name),
-            StreamPart::ToolCallDelta { id, delta } => self.emit_tool_call_delta(id, delta),
-            StreamPart::ToolCallDone { call } => self.emit_tool_call_done(&call),
+            StreamPart::ToolCallDelta { id, delta } => self.emit_tool_call_delta(id, delta)?,
+            StreamPart::ToolCallDone { call } => self.emit_tool_call_done(&call)?,
             StreamPart::WebSearch { queries, citations } => {
                 self.handle_web_search(queries, citations)
             }
@@ -613,6 +638,16 @@ fn tool_draft_span_id(round: u32, tool_call_id: &str) -> String {
     format!("tool_round_{}_{}", round, tool_call_id)
 }
 
+fn compact_tool_argument_limit(name: &str) -> Option<usize> {
+    (name == "present_artifacts").then_some(PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS)
+}
+
+fn oversized_tool_arguments_error(name: &str) -> String {
+    format!(
+        "{name} arguments are too large. Pass only artifact_ids or paths; never file contents, base64, or data URLs."
+    )
+}
+
 fn tool_draft_arguments(name: &str, phase: &str, argument_chars: usize) -> String {
     serde_json::json!({
         "_kivioToolDraft": true,
@@ -634,6 +669,13 @@ fn tool_draft_structured_content(name: &str, phase: &str, argument_chars: usize)
 }
 
 fn tool_draft_preview(name: &str, phase: &str, argument_chars: usize) -> String {
+    if compact_tool_argument_limit(name).is_some() {
+        return if phase == "arguments_ready" {
+            "工具参数已生成，等待调用…".to_string()
+        } else {
+            "正在展示文件…".to_string()
+        };
+    }
     if phase == "arguments_ready" {
         return "工具参数已生成，等待调用…".to_string();
     }
@@ -685,6 +727,10 @@ pub struct ChatStreamOutput {
     /// 模型原生生成的图片（Gemini native image gen，任务 07-24）：finish 时聚合到
     /// `GenerateOutput.images`，循环据此落成 assistant 消息级 artifacts。空 = 未出图。
     pub images: Vec<GeneratedImageData>,
+    /// OpenAI Responses 的原生 reasoning items（含 encrypted_content）。必须随
+    /// `to_openai_compatible_message` 进入 runtime 历史，下一轮回放给模型——否则
+    /// 思维链在每个工具轮边界被斩断（gpt-5 系 agent 行为退化的根因）。
+    pub reasoning_items: Vec<crate::chat::model::ProviderReasoningItem>,
 }
 
 impl ChatStreamOutput {
@@ -721,6 +767,7 @@ impl ChatStreamOutput {
             usage: None,
             web_search: None,
             images: Vec::new(),
+            reasoning_items: Vec::new(),
         }
     }
 
@@ -749,6 +796,7 @@ impl ChatStreamOutput {
         result.usage = output.usage;
         result.web_search = web_search;
         result.images = images;
+        result.reasoning_items = output.reasoning_items;
         result
     }
 
@@ -790,6 +838,13 @@ impl ChatStreamOutput {
         {
             message["finish_reason"] = Value::String(finish_reason.to_string());
         }
+        // Responses 原生 reasoning items 搭自定义键进历史（同 Gemini thought_signature
+        // 的方式）：经存储/回放 → MessagePart::ReasoningItem → 下一轮随 input 送回。
+        if !self.reasoning_items.is_empty() {
+            if let Ok(items) = serde_json::to_value(&self.reasoning_items) {
+                message["reasoning_items"] = items;
+            }
+        }
         message
     }
 }
@@ -829,7 +884,7 @@ mod tests {
     use crate::chat::agent::execute::ToolExecutionContext;
     use crate::chat::agent::host::AgentHostFuture;
     use crate::chat::ask_user::{AskUserPromptPayload, AskUserResponseResult};
-    use crate::mcp::types::native_write_file_tool;
+    use crate::mcp::types::{native_present_artifacts_tool, native_write_file_tool};
 
     #[derive(Default)]
     struct TestHost {
@@ -1048,6 +1103,98 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].tool_call_id.as_deref(), Some("call_write"));
         assert!(tracker.has_unfinished_drafts());
+    }
+
+    #[test]
+    fn present_artifacts_argument_stream_aborts_when_too_large() {
+        let host = TestHost::default();
+        let tracker =
+            ToolCallDraftTracker::new(vec![native_present_artifacts_tool()], 1, Some(1), 1000);
+        let mut sink = AgentStreamSink::new(
+            &host,
+            "conversation",
+            "run",
+            "message",
+            true,
+            None,
+            None,
+            Some(tracker.clone()),
+            None,
+        );
+
+        sink.emit(StreamPart::ToolCallStart {
+            id: "call_present".to_string(),
+            name: "present_artifacts".to_string(),
+        })
+        .expect("start should emit");
+        let err = sink
+            .emit(StreamPart::ToolCallDelta {
+                id: "call_present".to_string(),
+                delta: "x".repeat(PRESENT_ARTIFACTS_ARGUMENTS_MAX_CHARS + 1),
+            })
+            .expect_err("oversized present_artifacts args must abort the stream");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert!(err.to_string().contains("artifact_ids"), "{err}");
+
+        let records = host.records.lock().unwrap_or_else(|err| err.into_inner());
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0]
+                .result_preview
+                .as_deref()
+                .unwrap_or_default()
+                .contains("正在展示文件")
+        );
+        assert!(!records[0]
+            .result_preview
+            .as_deref()
+            .unwrap_or_default()
+            .contains("已收到"));
+    }
+
+    #[test]
+    fn present_artifacts_argument_stream_accepts_id_list() {
+        let host = TestHost::default();
+        let tracker =
+            ToolCallDraftTracker::new(vec![native_present_artifacts_tool()], 1, Some(1), 1000);
+        let mut sink = AgentStreamSink::new(
+            &host,
+            "conversation",
+            "run",
+            "message",
+            true,
+            None,
+            None,
+            Some(tracker),
+            None,
+        );
+        let args = r#"{"artifact_ids":["art_a","art_b"]}"#;
+
+        sink.emit(StreamPart::ToolCallStart {
+            id: "call_present".to_string(),
+            name: "present_artifacts".to_string(),
+        })
+        .expect("start should emit");
+        sink.emit(StreamPart::ToolCallDelta {
+            id: "call_present".to_string(),
+            delta: args.to_string(),
+        })
+        .expect("small present_artifacts args should stream");
+        sink.emit(StreamPart::ToolCallDone {
+            call: PendingToolCall {
+                id: "call_present".to_string(),
+                function_name: "present_artifacts".to_string(),
+                arguments: serde_json::json!({ "artifact_ids": ["art_a", "art_b"] }),
+                arguments_raw: args.to_string(),
+                arguments_parse_error: None,
+                signature: None,
+            },
+        })
+        .expect("done should emit");
+
+        let records = host.records.lock().unwrap_or_else(|err| err.into_inner());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].arguments, args);
     }
 
     #[test]
@@ -1277,5 +1424,45 @@ mod tests {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .is_empty());
+    }
+
+    /// Responses 原生 reasoning items 必须穿过 ChatStreamOutput 进入 runtime 历史
+    /// （planning 的 assistant 消息走这条路，不走 GenerateOutput 的转换）。
+    #[test]
+    fn stream_output_carries_reasoning_items_into_openai_message() {
+        let output = crate::chat::model::GenerateOutput {
+            text: String::new(),
+            reasoning: None,
+            tool_calls: vec![crate::chat::model::PendingToolCall {
+                id: "call_1".to_string(),
+                function_name: "read".to_string(),
+                arguments: serde_json::json!({ "path": "a.png" }),
+                arguments_raw: "{\"path\":\"a.png\"}".to_string(),
+                arguments_parse_error: None,
+                signature: None,
+            }],
+            usage: None,
+            finish_reason: Some("tool_calls".to_string()),
+            provider_messages: Vec::new(),
+            cancelled: false,
+            web_search: None,
+            images: Vec::new(),
+            reasoning_items: vec![crate::chat::model::ProviderReasoningItem {
+                model: "gpt-5.6".to_string(),
+                item: serde_json::json!({
+                    "type": "reasoning", "id": "rs_1", "summary": [],
+                    "encrypted_content": "gAAA"
+                }),
+            }],
+        };
+        let stream_output = ChatStreamOutput::from_generate_output_with_snapshot(
+            output,
+            String::new(),
+            String::new(),
+        );
+        let message = stream_output.to_openai_compatible_message();
+        assert_eq!(message["reasoning_items"][0]["model"], "gpt-5.6");
+        assert_eq!(message["reasoning_items"][0]["item"]["id"], "rs_1");
+        assert_eq!(message["tool_calls"][0]["id"], "call_1");
     }
 }

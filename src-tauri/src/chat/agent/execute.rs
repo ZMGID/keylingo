@@ -12,7 +12,7 @@ use crate::chat::model::PendingToolCall;
 use crate::chat::types::{ToolCallRecord, ToolCallStatus};
 use crate::mcp::types::{ChatToolArtifact, McpToolCallResult};
 use crate::mcp::ChatToolDefinition;
-use crate::settings::Settings;
+use crate::settings::{Settings, CHAT_TOOL_MAX_TIMEOUT_MS, CHAT_TOOL_MIN_TIMEOUT_MS};
 use crate::skills;
 
 use super::host::AgentHost;
@@ -748,21 +748,26 @@ fn artifact_presentation_hint(artifacts: &[ChatToolArtifact]) -> Option<String> 
     if artifacts.is_empty() {
         return None;
     }
-    let items = artifacts
-        .iter()
-        .filter_map(|artifact| {
-            artifact
-                .id
-                .as_deref()
-                .map(|id| format!("- {id}: {} ({})", artifact.name, artifact.mime_type))
-        })
-        .collect::<Vec<_>>();
+    let mut ids = Vec::new();
+    let mut items = Vec::new();
+    for artifact in artifacts {
+        let Some(id) = artifact.id.as_deref() else {
+            continue;
+        };
+        ids.push(id);
+        items.push(format!(
+            "- {id}: {} ({})",
+            artifact.name, artifact.mime_type
+        ));
+    }
     if items.is_empty() {
         return None;
     }
+    let example = serde_json::json!({ "artifact_ids": ids });
     Some(format!(
-        "Available artifacts (not shown automatically):\n{}\nCall present_artifacts with selected artifact_ids where the user should see them. Existing local files can be shown with paths.",
-        items.join("\n")
+        "Available artifacts (not shown automatically):\n{}\nTo show selected files in chat, copy those art_ ids into present_artifacts. Example: {}. Do not pass file contents, base64, or data URLs. Existing local files can be shown with paths.",
+        items.join("\n"),
+        example,
     ))
 }
 
@@ -815,8 +820,16 @@ fn effective_tool_timeout_ms(
             .get("timeout_ms")
             .and_then(|value| value.as_u64())
             .unwrap_or(default_timeout_ms)
-            .clamp(1_000, 300_000)
+            .clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS)
             .max(default_timeout_ms);
+    }
+    if tool.source == "native" && tool.name == "bash_output" {
+        let wait_ms = arguments
+            .get("wait_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(crate::native_tools::DEFAULT_BASH_OUTPUT_WAIT_MS)
+            .min(CHAT_TOOL_MAX_TIMEOUT_MS);
+        return default_timeout_ms.max(wait_ms);
     }
     // The `agent` spawn tool runs a whole sub-agent loop whose own budget
     // (SUB_AGENT_MAX_ATTEMPTS × the inner run) is far longer than the default
@@ -1237,6 +1250,8 @@ mod tests {
         assert!(hint.contains("art_report: report.txt (text/plain)"));
         assert!(hint.contains("not shown automatically"));
         assert!(hint.contains("present_artifacts"));
+        assert!(hint.contains(r#"{"artifact_ids":["art_report"]}"#));
+        assert!(hint.contains("Do not pass file contents, base64, or data URLs"));
         assert!(hint.contains("Existing local files can be shown with paths"));
     }
 
@@ -1615,6 +1630,26 @@ mod tests {
 
         assert_eq!(
             effective_tool_timeout_ms(&settings, &bash, &serde_json::json!({})),
+            300_000
+        );
+    }
+
+    #[test]
+    fn bash_output_timeout_covers_requested_wait() {
+        let mut settings = Settings::default();
+        settings.chat_tools.tool_timeout_ms = 60_000;
+        let tool = crate::mcp::types::native_bash_output_tool();
+
+        assert_eq!(
+            effective_tool_timeout_ms(&settings, &tool, &serde_json::json!({})),
+            60_000
+        );
+        assert_eq!(
+            effective_tool_timeout_ms(
+                &settings,
+                &tool,
+                &serde_json::json!({ "wait_ms": 300_000 })
+            ),
             300_000
         );
     }

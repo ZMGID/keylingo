@@ -712,6 +712,8 @@ fn gemini_parts_from_message(
             MessagePart::Reasoning { .. } => {
                 // 思维文本回放时丢弃（thoughtSignature 未保存；对连续性影响可接受）。
             }
+            // OpenAI Responses 专属的原生推理项：其它协议不识别，回放时忽略。
+            MessagePart::ReasoningItem { .. } => {}
         }
     }
     parts
@@ -904,6 +906,7 @@ pub fn output_from_gemini_response(
         cancelled: false,
         web_search: web_search_from_gemini_value(value),
         images,
+        reasoning_items: Vec::new(),
     })
 }
 
@@ -1223,6 +1226,7 @@ fn stream_output(
         cancelled: false,
         web_search: None,
         images: Vec::new(),
+        reasoning_items: Vec::new(),
     }
 }
 

@@ -780,13 +780,16 @@ async fn run_shell_command_background(
     });
 
     Ok(format!(
-        "background: true\njob_id: {job_id}\npid: {pid_text}\ncwd: {}\ncommand: {command}\n\nStarted in the background; it keeps running after this tool returns and survives across turns until you call kill_background or the app exits. Poll its output and exit status with bash_output (job_id: {job_id}); list all background jobs by calling bash_output with no job_id; stop it with kill_background (job_id: {job_id}). Do not start the same dev server twice.\n",
+        "background: true\njob_id: {job_id}\npid: {pid_text}\ncwd: {}\ncommand: {command}\n\nStarted in the background; it keeps running after this tool returns and survives across turns until you call kill_background or the app exits. Read its output and exit status with bash_output (job_id: {job_id}) — that call waits up to 30s for new output or exit, so do not poll in a tight loop; pass wait_ms to wait longer (0 = snapshot now). List all background jobs by calling bash_output with no job_id; stop it with kill_background (job_id: {job_id}). Do not start the same dev server twice.\n",
         cwd.display()
     ))
 }
 
-/// `bash_output` tool: incremental read of a tracked background job's captured
-/// output since `since_offset`, plus current status and exit code.
+/// `bash_output` 带 `job_id` 时默认阻塞这么久，等新输出或进程结束。
+/// 模型不必空转轮询；`wait_ms: 0` 仍是即时快照。
+pub const DEFAULT_BASH_OUTPUT_WAIT_MS: u64 = 30_000;
+const BASH_OUTPUT_POLL_INTERVAL_MS: u64 = 200;
+
 /// 该作业是否属于调用方会话。调用方无会话上下文（`None`）时不设限（headless /
 /// 测试路径）；作业本身无会话归属时同样放行（旧作业 / 测试种入）。
 fn job_visible_to(job: &BackgroundCommand, caller: Option<&str>) -> bool {
@@ -796,22 +799,20 @@ fn job_visible_to(job: &BackgroundCommand, caller: Option<&str>) -> bool {
     }
 }
 
-pub fn bash_output(
-    state: &AppState,
-    arguments: &Value,
-    conversation_id: Option<&str>,
-) -> Result<String, String> {
-    let job_id = arguments
-        .get("job_id")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "bash_output requires job_id".to_string())?;
-    let since_offset = arguments
-        .get("since_offset")
+fn bash_output_wait_ms(arguments: &Value) -> u64 {
+    arguments
+        .get("wait_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+        .unwrap_or(DEFAULT_BASH_OUTPUT_WAIT_MS)
+        .min(CHAT_TOOL_MAX_TIMEOUT_MS)
+}
 
+fn snapshot_bash_output(
+    state: &AppState,
+    job_id: &str,
+    since_offset: u64,
+    conversation_id: Option<&str>,
+) -> Result<(BackgroundCommandStatus, String, u64, String), String> {
     let (status, log_path, command) = {
         let map = state.background_commands_handle();
         let map = map.lock().unwrap_or_else(|e| e.into_inner());
@@ -830,8 +831,17 @@ pub fn bash_output(
     let start = (since_offset as usize).min(bytes.len());
     let new_text = String::from_utf8_lossy(&bytes[start..]).into_owned();
     let new_offset = bytes.len() as u64;
+    Ok((status, new_text, new_offset, command))
+}
 
-    let status_line = match &status {
+fn format_bash_output(
+    job_id: &str,
+    command: &str,
+    status: &BackgroundCommandStatus,
+    new_text: String,
+    new_offset: u64,
+) -> String {
+    let status_line = match status {
         BackgroundCommandStatus::Running => "status: running".to_string(),
         BackgroundCommandStatus::Exited { code } => match code {
             Some(c) => format!("status: exited\nexit_code: {c}"),
@@ -852,7 +862,64 @@ pub fn bash_output(
     } else {
         offload_large_output(format!("output:\n{new_text}"))
     };
-    Ok(format!("{header}\n{body}"))
+    format!("{header}\n{body}")
+}
+
+/// `bash_output` tool: incremental read of a tracked background job's captured
+/// output since `since_offset`, plus current status and exit code.
+///
+/// 带 `job_id` 且尚无新输出、作业仍在跑时，阻塞等到有输出 / 结束 / `wait_ms`
+/// （默认 30s）。取消由外层 `execute` 的 generation select 负责，不必在这里
+/// 再接一条取消通道。
+pub async fn bash_output(
+    state: &AppState,
+    arguments: &Value,
+    conversation_id: Option<&str>,
+) -> Result<String, String> {
+    let job_id = arguments
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "bash_output requires job_id".to_string())?;
+    let since_offset = arguments
+        .get("since_offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let wait_ms = bash_output_wait_ms(arguments);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+
+    loop {
+        let (status, new_text, new_offset, command) =
+            snapshot_bash_output(state, job_id, since_offset, conversation_id)?;
+        let ready = !new_text.is_empty()
+            || status.is_terminal()
+            || wait_ms == 0
+            || tokio::time::Instant::now() >= deadline;
+        if ready {
+            return Ok(format_bash_output(
+                job_id,
+                &command,
+                &status,
+                new_text,
+                new_offset,
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let slice = remaining.min(std::time::Duration::from_millis(
+            BASH_OUTPUT_POLL_INTERVAL_MS,
+        ));
+        if slice.is_zero() {
+            return Ok(format_bash_output(
+                job_id,
+                &command,
+                &status,
+                new_text,
+                new_offset,
+            ));
+        }
+        tokio::time::sleep(slice).await;
+    }
 }
 
 /// `list_background` tool: list this conversation's tracked background jobs.
@@ -1144,7 +1211,9 @@ mod tests {
 
     async fn poll_until_terminal(state: &AppState, args: &Value) -> String {
         for _ in 0..100 {
-            let out = bash_output(state, args, None).expect("bash_output should succeed");
+            let out = bash_output(state, args, None)
+                .await
+                .expect("bash_output should succeed");
             if !out.contains("status: running") {
                 return out;
             }
@@ -1190,7 +1259,7 @@ mod tests {
         assert!(listed.contains(&job_id), "job not listed: {listed}");
 
         // Poll bash_output until the process exits; assert captured output + code.
-        let args = serde_json::json!({ "job_id": job_id });
+        let args = serde_json::json!({ "job_id": job_id, "wait_ms": 0 });
         let out = poll_until_terminal(&state, &args).await;
         assert!(out.contains("status: exited"), "expected exit: {out}");
         assert!(out.contains("exit_code: 0"), "expected exit_code 0: {out}");
@@ -1219,7 +1288,9 @@ mod tests {
         });
 
         // First read from offset 0 sees all bytes and reports next_offset = 5.
-        let first = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
+        let first = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None)
+            .await
+            .unwrap();
         assert!(first.contains("hello"), "{first}");
         assert!(first.contains("next_offset: 5"), "{first}");
 
@@ -1230,6 +1301,7 @@ mod tests {
             &serde_json::json!({ "job_id": job_id, "since_offset": 5 }),
             None,
         )
+        .await
         .unwrap();
         assert!(second.contains("WORLD"), "{second}");
         assert!(
@@ -1242,8 +1314,8 @@ mod tests {
     }
 
     /// B3: 后台作业按会话隔离 —— A 会话不得列出/读取/kill B 会话起的作业。
-    #[test]
-    fn background_jobs_are_scoped_to_their_conversation() {
+    #[tokio::test]
+    async fn background_jobs_are_scoped_to_their_conversation() {
         let state = bg_test_state();
         let seed = |job_id: &str, conv: Option<&str>| {
             let log_path = std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
@@ -1282,15 +1354,17 @@ mod tests {
         // 读取输出：跨会话按「不存在」处理。
         assert!(bash_output(
             &state,
-            &serde_json::json!({ "job_id": job_b }),
+            &serde_json::json!({ "job_id": job_b, "wait_ms": 0 }),
             Some("conv-a")
         )
+        .await
         .is_err());
         assert!(bash_output(
             &state,
-            &serde_json::json!({ "job_id": job_a }),
+            &serde_json::json!({ "job_id": job_a, "wait_ms": 0 }),
             Some("conv-a")
         )
+        .await
         .is_ok());
 
         // kill：跨会话拒绝，本会话放行。
@@ -1358,7 +1432,9 @@ mod tests {
 
         // Status is Killed and stays Killed even after the waiter reaps the child.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let out = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
+        let out = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None)
+            .await
+            .unwrap();
         assert!(
             out.contains("status: killed"),
             "expected killed status: {out}"
@@ -1466,7 +1542,13 @@ mod tests {
         // Poll bash_output until the grandchild pid appears in the captured log.
         let mut grandchild_pid: Option<u32> = None;
         for _ in 0..100 {
-            let out = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
+            let out = bash_output(
+                &state,
+                &serde_json::json!({ "job_id": job_id, "wait_ms": 0 }),
+                None,
+            )
+            .await
+            .unwrap();
             if let Some(pid) = out
                 .lines()
                 .find_map(|l| l.trim().strip_prefix("GRANDCHILD_PID="))
@@ -1494,8 +1576,89 @@ mod tests {
     async fn bash_output_unknown_job_errors() {
         let state = bg_test_state();
         let err = bash_output(&state, &serde_json::json!({ "job_id": "nope" }), None)
+            .await
             .expect_err("unknown job should error");
         assert!(err.contains("No background job"), "{err}");
+    }
+
+    fn seed_running_job(state: &AppState, log_bytes: &[u8]) -> (String, std::path::PathBuf) {
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let log_path = std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
+        std::fs::write(&log_path, log_bytes).expect("seed log");
+        state.register_background_command(BackgroundCommand {
+            job_id: job_id.clone(),
+            conversation_id: None,
+            pid: None,
+            command: "seed".to_string(),
+            cwd: ".".to_string(),
+            log_path: log_path.clone(),
+            status: BackgroundCommandStatus::Running,
+            started_at: SystemTime::now(),
+            kill_tx: None,
+        });
+        (job_id, log_path)
+    }
+
+    #[tokio::test]
+    async fn bash_output_wait_ms_zero_returns_immediately_while_running() {
+        let state = bg_test_state();
+        let (job_id, log_path) = seed_running_job(&state, b"");
+        let started = std::time::Instant::now();
+        let out = bash_output(
+            &state,
+            &serde_json::json!({ "job_id": job_id, "wait_ms": 0 }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "wait_ms 0 must not block: {:?}",
+            started.elapsed()
+        );
+        assert!(out.contains("poll again"), "{out}");
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[tokio::test]
+    async fn bash_output_waits_until_new_output_arrives() {
+        let state = bg_test_state();
+        let (job_id, log_path) = seed_running_job(&state, b"");
+        let write_path = log_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let _ = std::fs::write(&write_path, b"hello-later");
+        });
+        let out = bash_output(
+            &state,
+            &serde_json::json!({ "job_id": job_id, "wait_ms": 2_000 }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("hello-later"), "{out}");
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[tokio::test]
+    async fn bash_output_wait_expires_when_still_running_with_no_output() {
+        let state = bg_test_state();
+        let (job_id, log_path) = seed_running_job(&state, b"");
+        let started = std::time::Instant::now();
+        let out = bash_output(
+            &state,
+            &serde_json::json!({ "job_id": job_id, "wait_ms": 250 }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(200),
+            "should wait until wait_ms: {:?}",
+            started.elapsed()
+        );
+        assert!(out.contains("poll again"), "{out}");
+        let _ = std::fs::remove_file(&log_path);
     }
 
     #[test]
