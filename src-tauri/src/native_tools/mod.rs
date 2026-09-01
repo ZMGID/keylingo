@@ -20,9 +20,9 @@ pub use sandbox_exports::{
 pub(crate) use shell::build_shell_command;
 pub use shell::run_command;
 pub use shell::{
-    bash_output, kill_background, kill_process_group, list_background, run_captured_command,
-    run_command_shell_hint, BackgroundCommand, BackgroundCommandStatus, CapturedCommand,
-    BG_CMD_LOG_PREFIX, DEFAULT_BASH_OUTPUT_WAIT_MS,
+    bash_foreground_timeout_ms, bash_output, kill_background, kill_process_group, list_background,
+    run_captured_command, run_command_shell_hint, BackgroundCommand, BackgroundCommandStatus,
+    CapturedCommand, BG_CMD_LOG_PREFIX, DEFAULT_BASH_OUTPUT_WAIT_MS,
 };
 
 use std::{

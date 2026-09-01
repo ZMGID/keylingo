@@ -1182,8 +1182,8 @@ fn default_skill_fallback_mode() -> String {
 }
 
 pub const CHAT_TOOL_MIN_TIMEOUT_MS: u64 = 1_000;
-/// 前台 `bash` / `bash_output` 等待上限。10 分钟够一批生图脚本跑完，不必被
-/// 逼进后台再空轮询 `bash_output`。
+/// 显式 `bash` `timeout_ms` 与 `bash_output` wait 的上限。省略 timeout 的
+/// 前台 bash 等到进程退出，不受默认 60s 工具超时约束。
 pub const CHAT_TOOL_MAX_TIMEOUT_MS: u64 = 600_000;
 /// 旧版工具轮次默认值。现默认**不限**（`None`），此常量仅供一次性迁移
 /// （`sanitize_settings` 把存量 20 归一到不限）与前端展示预设使用。

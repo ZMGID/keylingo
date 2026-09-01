@@ -12,7 +12,7 @@ use crate::chat::model::PendingToolCall;
 use crate::chat::types::{ToolCallRecord, ToolCallStatus};
 use crate::mcp::types::{ChatToolArtifact, McpToolCallResult};
 use crate::mcp::ChatToolDefinition;
-use crate::settings::{Settings, CHAT_TOOL_MAX_TIMEOUT_MS, CHAT_TOOL_MIN_TIMEOUT_MS};
+use crate::settings::{Settings, CHAT_TOOL_MAX_TIMEOUT_MS};
 use crate::skills;
 
 use super::host::AgentHost;
@@ -241,11 +241,15 @@ pub async fn execute_tool_call(
     host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
     let started = Instant::now();
     let timeout_ms = effective_tool_timeout_ms(settings, tool, &call.arguments);
+    let call_fut = executor.call(ctx, tool, call.arguments.clone(), skill_cache);
     let result = tokio::select! {
-        result = timeout(
-            Duration::from_millis(timeout_ms),
-            executor.call(ctx, tool, call.arguments.clone(), skill_cache),
-        ) => result,
+        result = async {
+            if timeout_ms == NO_OUTER_TOOL_TIMEOUT {
+                Ok(call_fut.await)
+            } else {
+                timeout(Duration::from_millis(timeout_ms), call_fut).await
+            }
+        } => result,
         _ = host.wait_for_generation_inactive(ctx.conversation_id, ctx.generation) => {
             record.status = ToolCallStatus::Cancelled;
             record.duration_ms = Some(started.elapsed().as_millis() as u64);
@@ -806,6 +810,9 @@ fn tool_content_with_structured_output(output: &McpToolCallResult, source: &str)
     content
 }
 
+/// 外层 `tokio::time::timeout` 的哨兵：bash 等到进程退出（或它自己的 timeout_ms）。
+const NO_OUTER_TOOL_TIMEOUT: u64 = u64::MAX;
+
 fn effective_tool_timeout_ms(
     settings: &Settings,
     tool: &ChatToolDefinition,
@@ -815,13 +822,10 @@ fn effective_tool_timeout_ms(
     if tool.source == "mixer" && tool.name == "mixer_generate_image" {
         return default_timeout_ms.max(crate::chat::image_generation::IMAGE_GENERATION_TIMEOUT_MS);
     }
+    // 前台 bash 自己等到退出；显式 timeout_ms 由 shell 杀掉进程。外层 60s
+    // 工具超时不能再套一层，否则有限长任务会被误杀、逼进 background。
     if tool.source == "native" && tool.name == "bash" {
-        return arguments
-            .get("timeout_ms")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(default_timeout_ms)
-            .clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS)
-            .max(default_timeout_ms);
+        return NO_OUTER_TOOL_TIMEOUT;
     }
     if tool.source == "native" && tool.name == "bash_output" {
         let wait_ms = arguments
@@ -862,10 +866,17 @@ fn format_tool_timeout_error(
     if !arg_summary.is_empty() {
         msg.push_str(&format!(" 参数摘要：{arg_summary}"));
     }
-    msg.push_str(
-        " 请勿原样重试同一条调用。建议：缩小单次任务（拆成更小的步骤）；\
+    if tool.source == "native" && tool.name == "bash" {
+        msg.push_str(
+            " 请勿原样重试同一条调用。有限长命令应省略 timeout_ms，让 bash 等到进程退出；\
+不要改成 background:true。只有永不退出的 server 才进后台。需要硬性杀进程时再传更大的 timeout_ms。",
+        );
+    } else {
+        msg.push_str(
+            " 请勿原样重试同一条调用。建议：缩小单次任务（拆成更小的步骤）；\
 核对路径与语法后换一版参数再试。需要更长等待可在设置中提高「工具超时」。",
-    );
+        );
+    }
     msg
 }
 
@@ -1623,14 +1634,22 @@ mod tests {
     }
 
     #[test]
-    fn five_minute_tool_timeout_applies_to_bash() {
+    fn bash_skips_generic_outer_tool_timeout() {
         let mut settings = Settings::default();
-        settings.chat_tools.tool_timeout_ms = 300_000;
+        settings.chat_tools.tool_timeout_ms = 60_000;
         let bash = crate::mcp::types::native_run_command_tool();
 
         assert_eq!(
             effective_tool_timeout_ms(&settings, &bash, &serde_json::json!({})),
-            300_000
+            u64::MAX
+        );
+        assert_eq!(
+            effective_tool_timeout_ms(
+                &settings,
+                &bash,
+                &serde_json::json!({ "timeout_ms": 5_000 })
+            ),
+            u64::MAX
         );
     }
 

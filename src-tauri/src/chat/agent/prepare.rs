@@ -238,7 +238,7 @@ fn work_style_prompt(available_builtin_tools: &[String]) -> String {
     );
     if has_tools {
         prompt.push_str(
-            " During multi-step tool work, keep the user oriented: before starting a new phase or changing course, say what you're doing in one short sentence — visible progress, not play-by-play; don't restate tool output.",
+            " During multi-step tool work, keep the user oriented: before starting a new phase or changing course, say what you're doing in one short sentence — visible progress, not play-by-play; don't restate tool output. After waiting on a long job, report substance from the new output — what finished, failed, or was rate-limited — not that it is still running.",
         );
         prompt.push_str(
             " Before declaring a deliverable done, verify it with your tools instead of assuming success: re-open what you produced and check it against the request",
@@ -964,10 +964,10 @@ fn native_tools_prompt(available_builtin_tools: &[String], _has_workbench: bool)
             "Runtime environment: {os_name}; bash runs via {shell_name}. Match that shell's syntax ({shell_syntax_hint}). Each bash call is a fresh process — cwd does NOT persist across calls; switch directories with the `cwd` parameter, not a prior `cd`. To run multi-line or quoted code, write it to a file with write and run that — do not cram it into inline commands like `python -c \"...\"` (inline quotes are fragile across shells). When a tool returns a hard rejection, change strategy instead of retrying variants of the same action; never re-run a failed command unchanged; don't drop one-off probe or cleanup scripts into the project."
         ));
         bullets.push(
-            "bash runs on the host shell from the current default workbench; non-zero exit means failure. Paths with spaces must use the `cwd` parameter—never `cd path && command`; do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev commands such as `npm run dev`, `tauri dev`, and `vite` start in the background automatically and return a job_id immediately; do not start the same dev server twice. Explain and get confirmation before destructive, network, or environment-changing commands. Run a skill's bundled scripts with run_command; never use host pip unless the user explicitly asked for a host Python install.".to_string(),
+            "bash runs on the host shell from the current default workbench; non-zero exit means failure. Paths with spaces must use the `cwd` parameter—never `cd path && command`; do not combine `cwd` with a leading `cd ... &&` prefix. Finite commands (builds, tests, image-generation batches) stay in the foreground: bash waits until the process exits. Put parallel work inside one command (a script --concurrency flag, etc.), not as N bash jobs. Pass timeout_ms only if you want the process killed at that deadline. Never-ending servers such as `npm run dev`, `tauri dev`, and `vite` start in the background automatically and return a job_id immediately; do not start the same dev server twice. Explain and get confirmation before destructive, network, or environment-changing commands. Run a skill's bundled scripts with run_command; never use host pip unless the user explicitly asked for a host Python install.".to_string(),
         );
         bullets.push(
-            "Background commands (bash with background:true, or auto-detected dev servers): the call returns a job_id immediately. Read incremental output and exit status with bash_output (pass the job_id; use the returned next_offset for the next read) — that call waits up to 30s for new output or exit, so do not poll in a tight loop; pass wait_ms to wait longer (0 = snapshot now). List all tracked jobs by calling bash_output with no job_id, and stop one with kill_background. Status in history may be stale, so refresh once with bash_output before reporting a background command's result. Background commands survive across turns until you kill them or the app exits, so kill_background a dev server when you no longer need it.".to_string(),
+            "Background commands (bash with background:true, or auto-detected never-ending servers): the call returns a job_id immediately. Inspect with bash_output (pass the job_id; default wait ~30s; use next_offset for the next read). Do not background a command that will exit. List jobs with bash_output (no job_id), and stop one with kill_background. Status in history may be stale, so refresh once with bash_output before reporting a background command's result. Background commands survive across turns until you kill them or the app exits, so kill_background a dev server when you no longer need it.".to_string(),
         );
     }
     if has_web_search || has_web_fetch {
@@ -1014,7 +1014,7 @@ fn native_tools_prompt(available_builtin_tools: &[String], _has_workbench: bool)
     }
     if has_write || has_edit || has_bash {
         bullets.push(
-            "Before changing code, read neighboring files and existing conventions — mimic the current style, naming, and the libraries/frameworks already in use; never assume a library is available without confirming the project already uses it. Do not add code comments unless asked. After code changes, verify when you can (run existing tests, lint/typecheck); never git commit/push unless the user explicitly asks. Reference code locations as `file_path:line_number`. When several independent lookups or commands are needed, call multiple tools in parallel in one message instead of serially.".to_string(),
+            "Before changing code, read neighboring files and existing conventions — mimic the current style, naming, and the libraries/frameworks already in use; never assume a library is available without confirming the project already uses it. Do not add code comments unless asked. After code changes, verify when you can (run existing tests, lint/typecheck); never git commit/push unless the user explicitly asks. Reference code locations as `file_path:line_number`. When several independent lookups are needed, call multiple tools in parallel in one message instead of serially. Host-shell work that can run together belongs inside one bash command, not as N bash calls.".to_string(),
         );
     }
 
@@ -1787,6 +1787,32 @@ mod tests {
         assert!(agent
             .agent_plan_prompt
             .is_some_and(|text| text.contains("act") || text.contains("plan")));
+    }
+
+    #[test]
+    fn native_tools_prompt_keeps_finite_bash_in_foreground() {
+        let names = vec![
+            "bash".to_string(),
+            "bash_output".to_string(),
+            "read".to_string(),
+        ];
+        let prompt = native_tools_prompt(&names, false).expect("prompt");
+        assert!(
+            prompt.contains("stay in the foreground"),
+            "finite bash must wait in the foreground: {prompt}"
+        );
+        assert!(
+            prompt.contains("Do not background a command that will exit"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("start it once with background:true"),
+            "must not push finite jobs to background: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Pass a larger wait_ms"),
+            "{prompt}"
+        );
     }
 
     #[test]

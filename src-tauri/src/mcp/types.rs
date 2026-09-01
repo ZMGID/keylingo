@@ -442,7 +442,7 @@ pub fn native_run_command_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__run_command".to_string(),
         name: "bash".to_string(),
-        description: format!("Run a host shell command (build, test, etc.).{shell_hint} In a project conversation, the command starts from the bound project root by default; any explicit cwd is only a startup directory and is validated as workspace-local. Do not use `cd path && command` when the path contains spaces—pass `cwd` and run only the remaining command. Do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev servers such as `npm run dev`, `npm run tauri dev`, and `vite` are started in the background automatically and return immediately with a pid. This is a sensitive host-shell capability, not the same boundary as the file tools: obey user constraints and explain or seek confirmation before cross-directory, destructive, network, or environment-changing commands. A non-zero exit code is returned as a tool error with stdout/stderr. Host Python package installs require an explicit user request and allow_host_python_package_install=true."),
+        description: format!("Run a host shell command (build, test, etc.).{shell_hint} In a project conversation, the command starts from the bound project root by default; any explicit cwd is only a startup directory and is validated as workspace-local. Do not use `cd path && command` when the path contains spaces—pass `cwd` and run only the remaining command. Do not combine `cwd` with a leading `cd ... &&` prefix. Foreground commands wait until they exit — omit timeout_ms unless you want the process killed at a deadline. Do not background finite jobs (builds, tests, image-generation batches); put parallel work inside one command. Long-running never-ending servers such as `npm run dev`, `npm run tauri dev`, and `vite` are started in the background automatically and return immediately with a job_id. This is a sensitive host-shell capability, not the same boundary as the file tools: obey user constraints and explain or seek confirmation before cross-directory, destructive, network, or environment-changing commands. A non-zero exit code is returned as a tool error with stdout/stderr. Host Python package installs require an explicit user request and allow_host_python_package_install=true."),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -451,8 +451,8 @@ pub fn native_run_command_tool() -> ChatToolDefinition {
             "properties": {
                 "command": { "type": "string", "description": "Shell command" },
                 "cwd": { "type": "string", "description": "Working directory (required when the path contains spaces; do not use `cd ... &&` for that)" },
-                "background": { "type": "boolean", "description": "Run in background and return immediately (auto-enabled for common dev servers)" },
-                "timeout_ms": { "type": "integer", "description": "Foreground timeout in ms (optional, max 600000). Prefer a longer timeout over background:true for finite batch jobs." },
+                "background": { "type": "boolean", "description": "Run in background and return a job_id immediately. Auto-enabled for never-ending dev servers. Do not use this for finite jobs that will exit." },
+                "timeout_ms": { "type": "integer", "description": "Optional kill deadline in ms (max 600000). Omit to wait until the command exits. Timeout kills the process and returns partial output; it does not background the job." },
                 "allow_host_python_package_install": { "type": "boolean", "description": "Only true when the user explicitly asked to modify the host Python environment; installs must use --user or a virtual environment." }
             },
             "required": ["command"]
@@ -467,7 +467,7 @@ pub fn native_bash_output_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__bash_output".to_string(),
         name: "bash_output".to_string(),
-        description: "Inspect background commands started by bash (background:true). With a job_id: waits for new stdout/stderr since since_offset (default 0), process exit, or wait_ms (default 30000; 0 = return immediately), then returns that output, status (running / exited with exit_code / killed / error), and next_offset for incremental reads. Do not poll in a tight loop — one call already waits. With NO job_id: lists all background commands tracked in this app session (job_id, status, command, working directory, age) — background commands survive across turns until killed or the app exits. Always refresh once with bash_output before reporting a background command's result to the user.".to_string(),
+        description: "Inspect background commands started by bash (background:true / auto-detected never-ending servers). With a job_id: waits until that process exits or wait_ms elapses (default 30000; 0 = return immediately), then returns captured stdout/stderr since since_offset (default 0), status (running / exited with exit_code / killed / error), and next_offset. New log lines do not end the wait. Finite jobs should use foreground bash (wait until exit) instead of this tool. With NO job_id: lists all background commands tracked in this app session (job_id, status, command, working directory, age) — background commands survive across turns until killed or the app exits. Always refresh once with bash_output before reporting a background command's result to the user.".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -476,7 +476,7 @@ pub fn native_bash_output_tool() -> ChatToolDefinition {
             "properties": {
                 "job_id": { "type": "string", "description": "The job_id returned when the background command was started. Omit to list all tracked background jobs instead." },
                 "since_offset": { "type": "integer", "description": "Byte offset to read from (use next_offset from the previous bash_output call for incremental reads; default 0)" },
-                "wait_ms": { "type": "integer", "description": "How long to wait for new output or exit before returning (default 30000). 0 returns a snapshot immediately. Capped at the tool timeout." }
+                "wait_ms": { "type": "integer", "description": "Maximum time to wait for the process to exit (default 30000). Returns sooner if it exits. New output does not end the wait. 0 returns a snapshot immediately. Capped at the tool timeout." }
             }
         }),
         sensitive: false,

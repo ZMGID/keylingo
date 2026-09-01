@@ -338,7 +338,7 @@ pub async fn run_captured_command(
         ));
     }
     let timeout_ms = timeout_ms.clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS);
-    let output = run_shell_command(command, cwd, timeout_ms, state).await?;
+    let output = run_shell_command(command, cwd, Some(timeout_ms), state).await?;
     Ok(CapturedCommand {
         exit_code: output.status_code.unwrap_or(-1),
         stdout: output.stdout,
@@ -346,9 +346,18 @@ pub async fn run_captured_command(
     })
 }
 
+/// Optional foreground kill deadline for `bash`. `None` = wait until the
+/// process exits (user stop still cancels). Explicit `timeout_ms` is a kill,
+/// not a promote-to-background.
+pub fn bash_foreground_timeout_ms(arguments: &Value) -> Option<u64> {
+    arguments
+        .get("timeout_ms")
+        .and_then(|value| value.as_u64())
+        .map(|ms| ms.clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS))
+}
+
 pub async fn run_command(
     workspace: &NativeToolWorkspace,
-    default_timeout_ms: u64,
     arguments: &Value,
     state: Option<&AppState>,
     conversation_id: Option<&str>,
@@ -395,13 +404,7 @@ pub async fn run_command(
         return run_shell_command_background(&command, cwd, state, conversation_id).await;
     }
 
-    let timeout_ms = arguments
-        .get("timeout_ms")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default_timeout_ms)
-        .clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS)
-        .max(default_timeout_ms);
-
+    let timeout_ms = bash_foreground_timeout_ms(arguments);
     let output = run_shell_command(&command, cwd, timeout_ms, state).await?;
     let formatted = offload_large_output(format_command_output(&output));
     if let Some(code) = output.status_code {
@@ -780,13 +783,14 @@ async fn run_shell_command_background(
     });
 
     Ok(format!(
-        "background: true\njob_id: {job_id}\npid: {pid_text}\ncwd: {}\ncommand: {command}\n\nStarted in the background; it keeps running after this tool returns and survives across turns until you call kill_background or the app exits. Read its output and exit status with bash_output (job_id: {job_id}) — that call waits up to 30s for new output or exit, so do not poll in a tight loop; pass wait_ms to wait longer (0 = snapshot now). List all background jobs by calling bash_output with no job_id; stop it with kill_background (job_id: {job_id}). Do not start the same dev server twice.\n",
+        "background: true\njob_id: {job_id}\npid: {pid_text}\ncwd: {}\ncommand: {command}\n\nStarted in the background (never-ending server). It keeps running after this tool returns until kill_background or the app exits. Check logs with bash_output (job_id: {job_id}, default wait ~30s). Finite commands that will exit should stay in the foreground — omit background and let bash wait until they finish. List jobs with bash_output (no job_id). Do not start the same dev server twice.\n",
         cwd.display()
     ))
 }
 
-/// `bash_output` 带 `job_id` 时默认阻塞这么久，等新输出或进程结束。
-/// 模型不必空转轮询；`wait_ms: 0` 仍是即时快照。
+/// `bash_output` 带 `job_id` 时默认阻塞这么久，等进程结束或到期。
+/// 给永不退出的 server 看日志用，不是有限长任务的等待原语。
+/// `wait_ms: 0` 仍是即时快照。
 pub const DEFAULT_BASH_OUTPUT_WAIT_MS: u64 = 30_000;
 const BASH_OUTPUT_POLL_INTERVAL_MS: u64 = 200;
 
@@ -868,9 +872,9 @@ fn format_bash_output(
 /// `bash_output` tool: incremental read of a tracked background job's captured
 /// output since `since_offset`, plus current status and exit code.
 ///
-/// 带 `job_id` 且尚无新输出、作业仍在跑时，阻塞等到有输出 / 结束 / `wait_ms`
-/// （默认 30s）。取消由外层 `execute` 的 generation select 负责，不必在这里
-/// 再接一条取消通道。
+/// 带 `job_id` 且作业仍在跑时，阻塞直到进程结束或 `wait_ms`（默认 30s）。
+/// 日志增长不结束等待。取消由外层 `execute` 的 generation select 负责。
+/// 有限长任务应走前台 bash（等到退出），不要用本工具当等待原语。
 pub async fn bash_output(
     state: &AppState,
     arguments: &Value,
@@ -892,8 +896,7 @@ pub async fn bash_output(
     loop {
         let (status, new_text, new_offset, command) =
             snapshot_bash_output(state, job_id, since_offset, conversation_id)?;
-        let ready = !new_text.is_empty()
-            || status.is_terminal()
+        let ready = status.is_terminal()
             || wait_ms == 0
             || tokio::time::Instant::now() >= deadline;
         if ready {
@@ -1012,20 +1015,21 @@ struct CommandOutput {
 async fn run_shell_command(
     command: &str,
     cwd: PathBuf,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
     state: Option<&AppState>,
 ) -> Result<CommandOutput, String> {
     exec_shell_command(build_shell_command(command), cwd, timeout_ms, state).await
 }
 
-/// Spawn an already-built shell `Command` and capture its output with a
-/// timeout. Split from `run_shell_command` so tests can exercise a specific
-/// shell builder (e.g. the PowerShell fallback) regardless of which shell
-/// `build_shell_command` would pick on this machine.
+/// Spawn an already-built shell `Command` and capture its output.
+/// `timeout_ms` is a kill deadline (Pi-style): omit it and the command runs
+/// until it exits. Split from `run_shell_command` so tests can exercise a
+/// specific shell builder (e.g. the PowerShell fallback) regardless of which
+/// shell `build_shell_command` would pick on this machine.
 async fn exec_shell_command(
     mut cmd: Command,
     cwd: PathBuf,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
     state: Option<&AppState>,
 ) -> Result<CommandOutput, String> {
     cmd.current_dir(cwd)
@@ -1041,7 +1045,7 @@ async fn exec_shell_command(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd.kill_on_drop(true);
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -1055,36 +1059,54 @@ async fn exec_shell_command(
         .spawn()
         .map_err(|err| format!("Failed to start command: {err}"))?;
     let child_pid = child.id();
+    let wait = child.wait_with_output();
+    tokio::pin!(wait);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| {
-        terminate_command_group(child_pid);
-        format!("Command timed out after {timeout_ms}ms")
-    })?
-    .map_err(|err| format!("Command failed: {err}"))?;
+    let output = if let Some(timeout_ms) = timeout_ms {
+        tokio::select! {
+            result = &mut wait => {
+                result.map_err(|err| format!("Command failed: {err}"))?
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
+                if let Some(pid) = child_pid {
+                    kill_process_group(pid);
+                }
+                return match tokio::time::timeout(std::time::Duration::from_secs(2), wait).await {
+                    Ok(Ok(output)) => Err(format_timeout_with_partial(timeout_ms, &output)),
+                    Ok(Err(err)) => Err(format!(
+                        "Command timed out after {timeout_ms}ms and was killed ({err})"
+                    )),
+                    Err(_) => Err(format!(
+                        "Command timed out after {timeout_ms}ms and was killed."
+                    )),
+                };
+            }
+        }
+    } else {
+        wait.await
+            .map_err(|err| format!("Command failed: {err}"))?
+    };
 
     Ok(CommandOutput {
-        status_code: result.status.code(),
-        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+        status_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
 }
 
-#[cfg(target_os = "macos")]
-fn terminate_command_group(child_pid: Option<u32>) {
-    if let Some(pid) = child_pid {
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
+fn format_timeout_with_partial(timeout_ms: u64, output: &std::process::Output) -> String {
+    let partial = CommandOutput {
+        status_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    let body = format_command_output(&partial);
+    if body.trim().is_empty() {
+        format!("Command timed out after {timeout_ms}ms and was killed.")
+    } else {
+        format!("Command timed out after {timeout_ms}ms and was killed.\n{body}")
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn terminate_command_group(_child_pid: Option<u32>) {}
 
 fn format_command_output(output: &CommandOutput) -> String {
     let mut out = String::new();
@@ -1229,7 +1251,6 @@ mod tests {
         let workspace = NativeToolWorkspace::global(&[]);
         let started = run_command(
             &workspace,
-            5_000,
             &serde_json::json!({
                 "command": echo_command(token),
                 "cwd": std::env::temp_dir().to_string_lossy(),
@@ -1409,7 +1430,6 @@ mod tests {
         let long = "sleep 30";
         let started = run_command(
             &workspace,
-            5_000,
             &serde_json::json!({
                 "command": long,
                 "cwd": std::env::temp_dir().to_string_lossy(),
@@ -1473,7 +1493,6 @@ mod tests {
         let workspace = NativeToolWorkspace::global(&[]);
         let started = run_command(
             &workspace,
-            5_000,
             &serde_json::json!({
                 "command": "sleep 30",
                 "cwd": std::env::temp_dir().to_string_lossy(),
@@ -1522,7 +1541,6 @@ mod tests {
         let cmd = "sleep 45 & echo GRANDCHILD_PID=$!; wait";
         let started = run_command(
             &workspace,
-            5_000,
             &serde_json::json!({
                 "command": cmd,
                 "cwd": std::env::temp_dir().to_string_lossy(),
@@ -1621,14 +1639,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_output_waits_until_new_output_arrives() {
+    async fn bash_output_waits_until_job_exits() {
         let state = bg_test_state();
         let (job_id, log_path) = seed_running_job(&state, b"");
         let write_path = log_path.clone();
+        let waiter_state = state.background_commands_handle();
+        let waiter_job = job_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             let _ = std::fs::write(&write_path, b"hello-later");
+            let mut map = waiter_state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(job) = map.get_mut(&waiter_job) {
+                job.status = BackgroundCommandStatus::Exited { code: Some(0) };
+            }
         });
+        let started = std::time::Instant::now();
         let out = bash_output(
             &state,
             &serde_json::json!({ "job_id": job_id, "wait_ms": 2_000 }),
@@ -1636,7 +1661,40 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1_000),
+            "should return when the job exits, not after wait_ms: {:?}",
+            started.elapsed()
+        );
         assert!(out.contains("hello-later"), "{out}");
+        assert!(out.contains("status: exited"), "{out}");
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[tokio::test]
+    async fn bash_output_log_growth_does_not_end_the_wait() {
+        let state = bg_test_state();
+        let (job_id, log_path) = seed_running_job(&state, b"[batch] started\n");
+        let write_path = log_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let _ = std::fs::write(&write_path, b"[batch] started\nH4 done\n");
+        });
+        let started = std::time::Instant::now();
+        let out = bash_output(
+            &state,
+            &serde_json::json!({ "job_id": job_id, "wait_ms": 280 }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(220),
+            "existing/growing logs must not skip wait_ms: {:?}",
+            started.elapsed()
+        );
+        assert!(out.contains("status: running"), "{out}");
+        assert!(out.contains("[batch] started"), "{out}");
         let _ = std::fs::remove_file(&log_path);
     }
 
@@ -1759,7 +1817,7 @@ mod tests {
             .block_on(exec_shell_command(
                 build_windows_powershell_command("python -c \"print(40 + 2)\""),
                 std::env::temp_dir(),
-                30_000,
+                Some(30_000),
                 None,
             ))
             .expect("spawn should succeed");
@@ -1789,7 +1847,7 @@ mod tests {
             .block_on(exec_shell_command(
                 build_windows_powershell_command("Write-Output (1+1)"),
                 std::env::temp_dir(),
-                30_000,
+                Some(30_000),
                 None,
             ))
             .expect("spawn should succeed");
@@ -1814,7 +1872,7 @@ mod tests {
             .block_on(exec_shell_command(
                 build_windows_powershell_command("Write-Output '你好'"),
                 std::env::temp_dir(),
-                30_000,
+                Some(30_000),
                 None,
             ))
             .expect("spawn should succeed");
@@ -1863,7 +1921,7 @@ mod tests {
             .block_on(run_shell_command(
                 "cat <<EOF\nheredoc_ok\nEOF\nfor i in $(seq 1 3); do echo \"n=$i\"; done | tail -n 1",
                 std::env::temp_dir(),
-                30_000,
+                Some(30_000),
                 None,
             ))
             .expect("spawn should succeed");
@@ -1909,6 +1967,61 @@ mod tests {
     }
 
     #[test]
+    fn bash_foreground_timeout_ms_is_none_when_omitted() {
+        assert_eq!(bash_foreground_timeout_ms(&serde_json::json!({})), None);
+        assert_eq!(
+            bash_foreground_timeout_ms(&serde_json::json!({ "timeout_ms": 5_000 })),
+            Some(5_000)
+        );
+        assert_eq!(
+            bash_foreground_timeout_ms(&serde_json::json!({ "timeout_ms": 1 })),
+            Some(CHAT_TOOL_MIN_TIMEOUT_MS)
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_timeout_kills_and_returns_partial_output() {
+        let dir = std::env::temp_dir().join(format!("kivio_timeout_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let workspace = NativeToolWorkspace::global(&[dir.to_string_lossy().into_owned()]);
+        #[cfg(target_os = "windows")]
+        let command = if run_command_shell_hint().is_empty() {
+            "Write-Output started; Start-Sleep -Seconds 20"
+        } else {
+            "printf 'started\\n'; sleep 20"
+        };
+        #[cfg(not(target_os = "windows"))]
+        let command = "printf 'started\\n'; sleep 20";
+        let started = std::time::Instant::now();
+        let err = run_command(
+            &workspace,
+            &serde_json::json!({
+                "command": command,
+                "cwd": dir.to_string_lossy(),
+                "timeout_ms": 1_200,
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect_err("timeout should kill the command");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "timeout must not wait for the full sleep: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.contains("timed out"),
+            "timeout error should say timed out: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("started"),
+            "partial stdout should survive the kill: {err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn is_long_running_dev_command_detects_common_dev_servers() {
         assert!(is_long_running_dev_command("npm run tauri dev"));
         assert!(is_long_running_dev_command("npx vite --port 5173"));
@@ -1920,7 +2033,6 @@ mod tests {
     async fn run_command_blocks_host_python_package_installs() {
         let err = run_command(
             &NativeToolWorkspace::global(&[]),
-            1_000,
             &serde_json::json!({ "command": "python3 -m pip install matplotlib" }),
             None,
             None,
@@ -1950,7 +2062,6 @@ mod tests {
             std::time::Duration::from_secs(5),
             run_command(
                 &workspace,
-                2_000,
                 &serde_json::json!({ "command": "cat" }),
                 None,
                 None,

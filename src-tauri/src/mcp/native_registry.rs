@@ -963,7 +963,6 @@ fn call_run_command(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     Box::pin(async move {
         let content = crate::native_tools::run_command(
             ctx.workspace,
-            ctx.settings.chat_tools.tool_timeout_ms,
             ctx.arguments,
             Some(ctx.state),
             ctx.native_ctx.map(|c| c.conversation_id.as_str()),

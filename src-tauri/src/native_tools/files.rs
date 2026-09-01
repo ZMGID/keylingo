@@ -1691,7 +1691,6 @@ mod tests {
         // 6) bash: a large output is offloaded to a temp log with a path note.
         let bash = crate::native_tools::run_command(
             &ws,
-            30_000,
             &json!({
                 "command": "for i in $(seq 1 4000); do echo \"line $i ----------------------------------------------------------------\"; done"
             }),
