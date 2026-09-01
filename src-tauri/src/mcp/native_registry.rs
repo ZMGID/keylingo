@@ -501,12 +501,18 @@ fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
                 ));
             }
             if let Some(nc) = ctx.native_ctx {
+                let overview = ctx
+                    .arguments
+                    .get("overview")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
                 return crate::chat::commands::read_images_as_tool_result(
                     ctx.app,
                     ctx.settings,
                     &nc.conversation_id,
                     &nc.message_id,
                     &image_paths,
+                    overview,
                 )
                 .await;
             }
