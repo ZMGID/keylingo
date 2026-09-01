@@ -23,6 +23,7 @@
 //! - Table order is the model-facing tool list order; keep it stable.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use serde_json::Value;
@@ -482,18 +483,8 @@ fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             }
         }
 
-        let mut image_paths = Vec::new();
-        let mut non_image = false;
-        for raw in &requested {
-            let Ok(path) = crate::native_tools::resolve_tool_read_path(ctx.workspace, raw) else {
-                continue;
-            };
-            if path.is_file() && crate::chat::knowledge_base::process::is_image_ext(&path) {
-                image_paths.push(path);
-            } else {
-                non_image = true;
-            }
-        }
+        let (image_paths, non_image, skipped) =
+            resolve_requested_read_paths(ctx.workspace, &requested);
         if !image_paths.is_empty() && (requested.len() > 1 || !non_image) {
             if non_image {
                 return Ok(text_tool_result(
@@ -506,7 +497,7 @@ fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
                     .get("overview")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
-                return crate::chat::commands::read_images_as_tool_result(
+                let mut result = crate::chat::commands::read_images_as_tool_result(
                     ctx.app,
                     ctx.settings,
                     &nc.conversation_id,
@@ -514,8 +505,13 @@ fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
                     &image_paths,
                     overview,
                 )
-                .await;
+                .await?;
+                append_skipped_read_notes(&mut result.content, &skipped);
+                return Ok(result);
             }
+        }
+        if image_paths.is_empty() && !skipped.is_empty() && requested.len() > 1 {
+            return Ok(text_tool_result(skipped.join("\n")));
         }
 
         let raw_path = single_path.as_deref().unwrap_or_default();
@@ -1015,6 +1011,40 @@ fn call_save_assistant(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     })
 }
 
+fn append_skipped_read_notes(content: &mut String, skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
+    }
+    if !content.is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str(&skipped.join("\n"));
+}
+
+fn resolve_requested_read_paths(
+    workspace: &NativeToolWorkspace,
+    requested: &[String],
+) -> (Vec<PathBuf>, bool, Vec<String>) {
+    let mut image_paths = Vec::new();
+    let mut non_image = false;
+    let mut skipped = Vec::new();
+    for raw in requested {
+        match crate::native_tools::resolve_tool_read_path(workspace, raw) {
+            Ok(path) => {
+                if !path.is_file() {
+                    skipped.push(format!("{raw}: not a readable file"));
+                } else if crate::chat::knowledge_base::process::is_image_ext(&path) {
+                    image_paths.push(path);
+                } else {
+                    non_image = true;
+                }
+            }
+            Err(err) => skipped.push(format!("{raw}: {err}")),
+        }
+    }
+    (image_paths, non_image, skipped)
+}
+
 fn string_list_argument(arguments: &Value, name: &str) -> Result<Vec<String>, String> {
     let Some(values) = arguments.get(name) else {
         return Ok(Vec::new());
@@ -1145,6 +1175,34 @@ mod tests {
         // Text and image files are NOT routed to the document-skill hint.
         assert!(skill_backed_document_hint(Path::new("/a/readme.txt")).is_none());
         assert!(skill_backed_document_hint(Path::new("/a/shot.png")).is_none());
+    }
+
+    #[test]
+    fn resolve_requested_read_paths_reports_unreadable_entries() {
+        let workspace = NativeToolWorkspace::standalone();
+        let (images, non_image, skipped) = resolve_requested_read_paths(
+            &workspace,
+            &[
+                "kivio-missing-read-test-7e2c9a1b.png".to_string(),
+                "kivio-missing-read-test-7e2c9a1b.jpg".to_string(),
+            ],
+        );
+        assert!(images.is_empty());
+        assert!(!non_image);
+        assert_eq!(skipped.len(), 2);
+        assert!(
+            skipped[0].contains("kivio-missing-read-test-7e2c9a1b.png"),
+            "{skipped:?}"
+        );
+        assert!(
+            skipped[1].contains("kivio-missing-read-test-7e2c9a1b.jpg"),
+            "{skipped:?}"
+        );
+
+        let mut content = "已读取 1 张图片".to_string();
+        append_skipped_read_notes(&mut content, &skipped);
+        assert!(content.contains("kivio-missing-read-test-7e2c9a1b.png"));
+        assert!(content.contains("已读取 1 张图片"));
     }
 
     const EXPECTED_ORDER: &[&str] = &[

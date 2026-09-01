@@ -251,7 +251,8 @@ pub(super) async fn analyze_chat_images_with_auxiliary_model(
     })
 }
 
-const MAX_READ_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
+/// 读盘硬顶。超过才拒；12–16MB 的相机 JPEG 先走入口降采样。
+const MAX_READ_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_READ_IMAGES: usize = super::image_collage::COLLAGE_MAX_IMAGES;
 
 fn image_file_name(path: &Path) -> String {

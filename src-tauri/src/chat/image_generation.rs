@@ -112,11 +112,8 @@ pub(crate) async fn generate_image_with_provider(
     operation: &str,
 ) -> Result<McpToolCallResult, String> {
     let mut request = parse_request(arguments)?;
-    request.input_images = input_images
-        .iter()
-        .cloned()
-        .take(MAX_INPUT_IMAGES)
-        .collect();
+    reject_excess_reference_images(provider, model, input_images.len())?;
+    request.input_images = input_images.to_vec();
     validate_provider(provider)?;
 
     // 端点选择：先查会话缓存（自愈学到的纠正结果），否则用单一解析器。
@@ -1181,7 +1178,6 @@ fn xai_edits_body(model: &str, request: &ImageGenerationRequest) -> Value {
     let refs = request
         .input_images
         .iter()
-        .take(XAI_MAX_EDIT_IMAGES)
         .map(|image| {
             serde_json::json!({
                 "url": data_url_for_input(image),
@@ -1253,9 +1249,31 @@ fn images_edits_form(
 pub(crate) fn load_input_images_from_paths(paths: &[PathBuf]) -> Result<Vec<InputImage>, String> {
     paths
         .iter()
-        .take(MAX_INPUT_IMAGES)
         .map(|path| load_input_image_from_path(path))
         .collect()
+}
+
+fn max_reference_images(provider: &ModelProvider, model: &str) -> usize {
+    if uses_xai_images_api(provider, model) {
+        XAI_MAX_EDIT_IMAGES
+    } else {
+        MAX_INPUT_IMAGES
+    }
+}
+
+fn reject_excess_reference_images(
+    provider: &ModelProvider,
+    model: &str,
+    count: usize,
+) -> Result<(), String> {
+    let max_refs = max_reference_images(provider, model);
+    if count > max_refs {
+        Err(format!(
+            "This image model accepts at most {max_refs} reference images (got {count})"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn load_input_image_from_path(path: &Path) -> Result<InputImage, String> {
@@ -1324,7 +1342,6 @@ fn collect_mixer_input_images(
     }
 
     if !images.is_empty() {
-        images.truncate(MAX_INPUT_IMAGES);
         return Ok(images);
     }
     if !artifact_ids.is_empty() || !paths.is_empty() {
@@ -1375,9 +1392,6 @@ fn string_list_arg(arguments: &Value, name: &str) -> Vec<String> {
 }
 
 fn push_input_image(images: &mut Vec<InputImage>, image: InputImage) {
-    if images.len() >= MAX_INPUT_IMAGES {
-        return;
-    }
     if images
         .iter()
         .any(|existing| existing.base64 == image.base64)
@@ -1426,6 +1440,11 @@ fn input_image_from_artifact(
         if path.is_file() {
             return load_input_image_from_path(&path);
         }
+        return Err(format!(
+            "Artifact `{}` image file is missing: {}",
+            artifact.id.as_deref().unwrap_or(&artifact.name),
+            path.display()
+        ));
     }
     if artifact.data_url.starts_with("data:") {
         let (mime_type, base64) = parse_image_data_url(&artifact.data_url)?;
@@ -2055,5 +2074,68 @@ mod tests {
         );
         assert!(string_list_arg(&arguments, "artifact_ids").is_empty());
         assert!(string_list_arg(&arguments, "missing").is_empty());
+    }
+
+    #[test]
+    fn xai_reference_image_cap_is_three_and_does_not_silently_drop() {
+        let xai = ModelProvider {
+            id: "xai".to_string(),
+            name: "xAI".to_string(),
+            api_keys: vec!["k".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.x.ai/v1".to_string(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "xai_responses".to_string(),
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+            request: Default::default(),
+            active_key_index: 0,
+        };
+        assert_eq!(max_reference_images(&xai, "grok-imagine-image"), 3);
+        assert_eq!(
+            max_reference_images(&gemini_provider(), "gemini-3.1-flash-image"),
+            4
+        );
+        let err = reject_excess_reference_images(&xai, "grok-imagine-image", 4)
+            .expect_err("xAI must refuse a 4th reference");
+        assert!(err.contains("at most 3"), "{err}");
+        assert!(err.contains("got 4"), "{err}");
+        assert!(reject_excess_reference_images(&xai, "grok-imagine-image", 3).is_ok());
+        assert!(
+            reject_excess_reference_images(&gemini_provider(), "gemini-3.1-flash-image", 4).is_ok()
+        );
+        assert!(
+            reject_excess_reference_images(&gemini_provider(), "gemini-3.1-flash-image", 5)
+                .is_err()
+        );
+
+        let four = vec![
+            sample_input_image(),
+            InputImage {
+                mime_type: "image/png".to_string(),
+                base64: "two".to_string(),
+            },
+            InputImage {
+                mime_type: "image/png".to_string(),
+                base64: "three".to_string(),
+            },
+            InputImage {
+                mime_type: "image/png".to_string(),
+                base64: "four".to_string(),
+            },
+        ];
+        let body = xai_edits_body(
+            "grok-imagine-image",
+            &ImageGenerationRequest {
+                prompt: "sketch".to_string(),
+                size: "auto".to_string(),
+                quality: "auto".to_string(),
+                n: 1,
+                input_images: four[..3].to_vec(),
+            },
+        );
+        assert_eq!(body["images"].as_array().map(|v| v.len()), Some(3));
     }
 }

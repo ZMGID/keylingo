@@ -266,11 +266,11 @@ pub(crate) async fn chat_optimize_prompt(
             session_owned = Some((snapshot.provider_id.clone(), snapshot.model.clone()));
         }
     }
-    let session = session_owned.as_ref().map(|(provider_id, model)| SessionModel {
-        provider_id,
-        model,
-    });
+    let session = session_owned
+        .as_ref()
+        .map(|(provider_id, model)| SessionModel { provider_id, model });
     let conversation_id = conversation_id.unwrap_or_default();
+    let language = crate::settings::resolve_chat_language(&settings);
     match timeout(
         Duration::from_secs(30),
         optimize_prompt_with_model(
@@ -285,7 +285,11 @@ pub(crate) async fn chat_optimize_prompt(
     .await
     {
         Ok(result) => result,
-        Err(_) => Err("问题优化超时，请重试".to_string()),
+        Err(_) => Err(localize(
+            &language,
+            "问题优化超时，请重试",
+            "Prompt optimize timed out. Try again.",
+        )),
     }
 }
 
@@ -321,6 +325,26 @@ mod tests {
             timestamp: 1,
             degraded: None,
         }
+    }
+
+    #[test]
+    fn prompt_optimize_timeout_is_localized() {
+        assert_eq!(
+            localize(
+                "en",
+                "问题优化超时，请重试",
+                "Prompt optimize timed out. Try again."
+            ),
+            "Prompt optimize timed out. Try again."
+        );
+        assert_eq!(
+            localize(
+                "zh",
+                "问题优化超时，请重试",
+                "Prompt optimize timed out. Try again."
+            ),
+            "问题优化超时，请重试"
+        );
     }
 
     #[test]
@@ -477,16 +501,10 @@ mod tests {
         settings.default_models.prompt_optimize.model = "optimize-model".into();
         settings.retry_enabled = false;
 
-        let rewritten = optimize_prompt_with_model(
-            &settings,
-            &state,
-            "conv_opt",
-            None,
-            "帮我看看这个",
-            "",
-        )
-        .await
-        .expect("rewrite from streamed model");
+        let rewritten =
+            optimize_prompt_with_model(&settings, &state, "conv_opt", None, "帮我看看这个", "")
+                .await
+                .expect("rewrite from streamed model");
 
         assert!(rewritten.contains("拆分这段代码"));
 

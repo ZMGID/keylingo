@@ -13,7 +13,9 @@
 
 use std::io::Cursor;
 
-use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, RgbImage};
+use image::{
+    codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageDecoder, RgbImage,
+};
 
 /// 喂给模型的图片最长边上限。pi / Claude Code 同为 2000，Codex 为 2048；
 /// Anthropic 服务端超过 1568px 也会自己内部降采样，2000 已是「略大保画质」的取值。
@@ -26,27 +28,48 @@ pub(super) const MODEL_IMAGE_TARGET_BYTES: usize = 2 * 1024 * 1024;
 /// JPEG 质量阶梯（对齐 pi 的 80→…→40 与 Claude Code 的 80→60→40→20）。
 const JPEG_QUALITY_LADDER: [u8; 4] = [80, 60, 40, 20];
 
+/// 解码并应用 EXIF Orientation。`load_from_memory` / `image::open` 都不转方向，
+/// JPEG 重编码会丢掉 EXIF，手机竖拍会侧着进模型。
+pub(super) fn decode_oriented(bytes: &[u8]) -> Option<DynamicImage> {
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    Some(img)
+}
+
 /// 入口降采样：返回 `Some((jpeg_bytes, "image/jpeg"))` 表示已处理，`None` 表示
 /// 原字节直接可用（尺寸/体积都在界内，或根本解不出来——直通是唯一安全的降级）。
 pub(super) fn prepare_image_bytes_for_model(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     // 先只读头部拿尺寸，避免为了「本来就合规」的图付一次全量解码。
+    // 头部是存储像素尺寸，不含 EXIF 旋转；小图直通会把 EXIF 留给模型自己处理。
     let (width, height) = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
         .into_dimensions()
         .ok()?;
-    let within_dims = width <= MODEL_IMAGE_MAX_DIM && height <= MODEL_IMAGE_MAX_DIM;
-    if within_dims && bytes.len() <= MODEL_IMAGE_TARGET_BYTES {
+    let header_within_dims = width <= MODEL_IMAGE_MAX_DIM && height <= MODEL_IMAGE_MAX_DIM;
+    if header_within_dims && bytes.len() <= MODEL_IMAGE_TARGET_BYTES {
         return None;
     }
 
-    let decoded = image::load_from_memory(bytes).ok()?;
-    let resized = if within_dims {
-        decoded
-    } else {
-        // Triangle 与 Codex 同款：比 Lanczos 快数倍，缩小场景画质差异不可见。
-        decoded.resize(MODEL_IMAGE_MAX_DIM, MODEL_IMAGE_MAX_DIM, FilterType::Triangle)
-    };
+    let decoded = decode_oriented(bytes)?;
+    let resized =
+        if decoded.width() <= MODEL_IMAGE_MAX_DIM && decoded.height() <= MODEL_IMAGE_MAX_DIM {
+            decoded
+        } else {
+            // Triangle 与 Codex 同款：比 Lanczos 快数倍，缩小场景画质差异不可见。
+            decoded.resize(
+                MODEL_IMAGE_MAX_DIM,
+                MODEL_IMAGE_MAX_DIM,
+                FilterType::Triangle,
+            )
+        };
     let rgb = flatten_onto_white(resized);
 
     let mut smallest: Option<Vec<u8>> = None;
@@ -113,7 +136,10 @@ mod tests {
             prepare_image_bytes_for_model(&png_bytes(&img)).expect("must be processed");
         assert_eq!(mime, "image/jpeg");
         let (w, h) = decoded_dims(&jpeg);
-        assert!(w <= MODEL_IMAGE_MAX_DIM && h <= MODEL_IMAGE_MAX_DIM, "got {w}x{h}");
+        assert!(
+            w <= MODEL_IMAGE_MAX_DIM && h <= MODEL_IMAGE_MAX_DIM,
+            "got {w}x{h}"
+        );
         // 等比：3000x1200 → 2000x800
         assert_eq!((w, h), (2000, 800));
         assert!(jpeg.len() <= MODEL_IMAGE_TARGET_BYTES);
@@ -128,7 +154,10 @@ mod tests {
             image::Rgb([(seed >> 8) as u8, (seed >> 16) as u8, (seed >> 24) as u8])
         }));
         let png = png_bytes(&img);
-        assert!(png.len() > MODEL_IMAGE_TARGET_BYTES, "fixture must exceed target");
+        assert!(
+            png.len() > MODEL_IMAGE_TARGET_BYTES,
+            "fixture must exceed target"
+        );
 
         let (jpeg, _) = prepare_image_bytes_for_model(&png).expect("must be recompressed");
         assert!(jpeg.len() < png.len());
@@ -144,12 +173,65 @@ mod tests {
         let img = image::load_from_memory(&jpeg).unwrap().to_rgb8();
         let px = img.get_pixel(img.width() / 2, img.height() / 2);
         // JPEG 有量化误差，留余量断言「接近白」。
-        assert!(px[0] > 240 && px[1] > 240 && px[2] > 240, "flattened pixel was {px:?}");
+        assert!(
+            px[0] > 240 && px[1] > 240 && px[2] > 240,
+            "flattened pixel was {px:?}"
+        );
     }
 
     #[test]
     fn undecodable_bytes_pass_through() {
         assert!(prepare_image_bytes_for_model(b"not an image at all").is_none());
+    }
+
+    fn jpeg_with_exif_orientation(img: &RgbImage, orientation: u8) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&DynamicImage::ImageRgb8(img.clone()))
+            .expect("jpeg encode");
+        assert_eq!(&jpeg[..2], [0xFF, 0xD8]);
+        let mut exif = b"Exif\0\0".to_vec();
+        exif.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00]);
+        exif.extend_from_slice(&[0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        exif.extend_from_slice(&[orientation, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let app1_len = u16::try_from(exif.len() + 2).expect("exif fits");
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend_from_slice(&app1_len.to_be_bytes());
+        app1.extend_from_slice(&exif);
+        jpeg.splice(2..2, app1);
+        jpeg
+    }
+
+    #[test]
+    fn jpeg_exif_orientation_6_is_rotated_before_resize() {
+        // 存储为 2400×800 横图，顶 40 行红、其余绿；Orientation=6 表示应顺时针转 90°。
+        let img = RgbImage::from_fn(2400, 800, |_, y| {
+            if y < 40 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 255, 0])
+            }
+        });
+        let jpeg = jpeg_with_exif_orientation(&img, 6);
+        let (out, mime) = prepare_image_bytes_for_model(&jpeg).expect("oversized must process");
+        assert_eq!(mime, "image/jpeg");
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        assert!(
+            decoded.height() > decoded.width(),
+            "EXIF 6 should yield a portrait, got {}x{}",
+            decoded.width(),
+            decoded.height()
+        );
+        let right = decoded.get_pixel(decoded.width() - 4, decoded.height() / 2);
+        let top = decoded.get_pixel(decoded.width() / 2, 4);
+        assert!(
+            right[0] > 200 && right[1] < 80,
+            "right edge should be the former top (red), got {right:?}"
+        );
+        assert!(
+            top[1] > 200 && top[0] < 80,
+            "top edge should be the former left (green), got {top:?}"
+        );
     }
 
     #[test]
@@ -177,7 +259,10 @@ mod tests {
                 None => panic!("3000×2000 shot must be resized"),
             };
             let (w, h) = decoded_dims(&payload);
-            assert!(w <= MODEL_IMAGE_MAX_DIM && h <= MODEL_IMAGE_MAX_DIM, "got {w}x{h}");
+            assert!(
+                w <= MODEL_IMAGE_MAX_DIM && h <= MODEL_IMAGE_MAX_DIM,
+                "got {w}x{h}"
+            );
             assert!(payload.len() <= MODEL_IMAGE_TARGET_BYTES);
             total_b64 += payload.len() * 4 / 3;
         }

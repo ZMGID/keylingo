@@ -175,7 +175,8 @@ pub(super) fn collage_from_paths(paths: &[impl AsRef<Path>]) -> Option<ImageColl
     let mut tiles = Vec::with_capacity(paths.len());
     for path in paths {
         let path = path.as_ref();
-        let img = image::open(path).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let img = super::image_prep::decode_oriented(&bytes)?;
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
