@@ -514,7 +514,10 @@ impl OpenAiResponsesProvider<'_> {
                     body["reasoning"] = serde_json::json!({ "effort": mapped });
                 }
             } else {
-                body["reasoning"] = serde_json::json!({ "effort": effort });
+                // summary 必须显式要：官方不 opt-in 就不会下流式思考标题，界面空等
+                // 几十秒再出正文。auto 随模型给 concise/detailed。
+                body["reasoning"] =
+                    serde_json::json!({ "effort": effort, "summary": "auto" });
                 // 无状态模式：Responses 的 `store` 默认 true（服务端保存会话状态并按
                 // response id 串联轮次）。我们每轮都自带完整 input，不依赖服务端状态，
                 // 让服务端白存一份没有意义；代理渠道多半也没真正实现存储。
@@ -1872,6 +1875,12 @@ mod tests {
             xai_body("grok-4.3", Some("xhigh"), false)["reasoning"]["effort"],
             "xhigh"
         );
+        assert!(
+            xai_body("grok-4.3", Some("high"), false)["reasoning"]
+                .get("summary")
+                .is_none(),
+            "xAI must not get OpenAI reasoning.summary",
+        );
         // 开思考但未设档 → 不发 reasoning（不擅自兜底）。
         assert!(xai_body("grok-4.3", None, false).get("reasoning").is_none());
         // UI Off → 显式 effort:"none"（thinking_enabled=false，level=None）。
@@ -1936,6 +1945,7 @@ mod tests {
         assert_eq!(body["instructions"], "你是 Kivio");
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["summary"], "auto");
         assert_eq!(body["prompt_cache_key"], "conv_abc");
         assert!(body.get("prompt_cache_retention").is_none());
         assert_eq!(body["input"][0]["role"], "user");
@@ -2049,12 +2059,14 @@ mod tests {
         req_high.options.thinking_level = Some("high".into());
         let high = adapter.request_body(&req_high, false);
         assert_eq!(high["reasoning"]["effort"], "high", "body: {high}");
+        assert_eq!(high["reasoning"]["summary"], "auto", "body: {high}");
         // xhigh 原样下发（gpt-5.1-codex-max 起支持；哪些模型认由模型库 reasoningEfforts 门控，
         // 适配器不再按协议收敛成 high）。
         let mut req_x = base.clone();
         req_x.options.thinking_level = Some("xhigh".into());
         let xh = adapter.request_body(&req_x, false);
         assert_eq!(xh["reasoning"]["effort"], "xhigh", "body: {xh}");
+        assert_eq!(xh["reasoning"]["summary"], "auto", "body: {xh}");
         // 纯对话（开思考、无内置、无档）⇒ 不发 reasoning。
         assert!(off.get("reasoning").is_none(), "body: {off}");
         // UI Off → 显式 none（OpenAI / DeepSeek Responses 文档；省略会默认 high）。

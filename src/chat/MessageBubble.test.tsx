@@ -81,6 +81,18 @@ describe('MessageBubble mount motion', () => {
   })
 })
 
+describe('MessageBubble thinking', () => {
+  it('does not paint Thinking until reasoning summary text exists', () => {
+    render(
+      <MessageBubble
+        message={{ id: 'a', role: 'assistant', content: '', timestamp: 1 }}
+        messageStreaming
+      />,
+    )
+    expect(screen.queryByLabelText('Thinking')).not.toBeInTheDocument()
+  })
+})
+
 describe('MessageBubble agent plan action', () => {
   it('renders execute action for a message-scoped draft plan', async () => {
     const user = userEvent.setup()

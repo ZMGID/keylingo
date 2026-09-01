@@ -1237,7 +1237,7 @@ function MessageBubbleComponent({
           </section>
         )}
 
-        {message.reasoning && !hasTimelineSegments && (
+        {Boolean((message.reasoning ?? '').trim()) && !hasTimelineSegments && (
           <ReasoningBlock
             reasoning={message.reasoning}
             streaming={reasoningStreaming}
