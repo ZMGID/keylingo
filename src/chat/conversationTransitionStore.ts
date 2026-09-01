@@ -8,7 +8,12 @@ export interface ConversationTransitionSnapshot {
 }
 
 export interface ConversationLoadHint {
-  /** 侧栏索引里的消息数量，仅用于决定是否立即显示加载态，不限制实际加载内容。 */
+  /**
+   * 侧栏索引里的消息数量，仅用于决定是否**立即**显示加载 Logo，不限制实际加载内容。
+   * 注意这不是「显示/不显示」的开关：代理会话消息数极少但内容极重（一轮 run 的全部
+   * 工具卡挂在一条 assistant 消息上），被判为小会话时 ConversationLoadingState 仍会在
+   * 150ms 后补上 Logo。
+   */
   messageCount?: number
   /** 全局搜索跳转：打开会话后滚到这条消息并短暂高亮。 */
   focusMessageId?: string

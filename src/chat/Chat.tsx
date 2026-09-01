@@ -2699,6 +2699,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       currentConversationIdRef.current === conversationId
       && currentConversationRef.current?.id === conversationId
     ) {
+      // 若正有一个指向其他会话的加载在途（点了大会话还没落地，又点回当前会话），
+      // 这次点击的语义是「留在这里」：作废在途转场，否则它落地时会把界面切走，
+      // 用户看到的就是「点了没反应，必须等加载完」。
+      const inFlight = getConversationTransitionSnapshot()
+      if (inFlight.loading && inFlight.targetConversationId !== conversationId) {
+        invalidateConversationTransition()
+      }
       setFocusMessageId(conversationHint?.focusMessageId ?? null)
       // 路由可能因为停留在中心页（技能/MCP/设置…）而偏离当前会话，补一次对齐。
       syncConversationRoute(conversationId)

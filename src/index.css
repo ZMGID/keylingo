@@ -8036,8 +8036,12 @@ input[type="password"]::-ms-clear {
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
 
-/* ---- 状态行墨团 + 会话切换点阵。身体/点阵都用这一套尺寸；
-   脉冲只挂在 .kv-stream-dot-logo 上，不要给 128 个圆各自挂 animation。 ---- */
+/* ---- 状态行墨团 + 会话切换点阵。身体/点阵都用这一套尺寸。
+   点阵的动效是 GRD-02 横向扫光：--dx 是点相对 Logo 中心的横向归一化位置，
+   通过错峰延迟让一条亮波左右往返扫过 Logo（整颗 SVG 只做透明度脉冲的话，
+   大会话切换时主线程被渲染占住，非合成动画一帧都动不了，看起来像卡死）。
+   常驻的流式状态行用的是墨团（KivioBlob）；这套逐点 animation 只出现在
+   会话切换覆盖层这个短暂窗口里，不会长期钉住 WebView2 的 vsync。 ---- */
 .kv-stream-logo {
   display: block;
   overflow: visible;
@@ -8049,20 +8053,28 @@ input[type="password"]::-ms-clear {
 .kv-stream-dot-logo {
   --k: 1;
   --dot: #1d6bf0;
-  animation: kv-stream-logo-pulse calc(1.6s * var(--k)) ease-in-out infinite;
 }
 .chat-conversation-loading .kv-stream-dot-logo {
   --k: 0.68;
 }
 .kv-stream-dot-logo circle {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
   fill: var(--dot);
 }
-@keyframes kv-stream-logo-pulse {
-  0%, 100% { opacity: 0.42; }
-  50% { opacity: 1; }
+.kv-stream-dot-logo .dt {
+  animation: kv-stream-sweep calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
+  /* 左侧点（--dx 更小）先进入高亮，随后向右传播；alternate 让下一半周期反向传播。 */
+  animation-delay: calc((1 - var(--dx)) * -0.18s * var(--k));
+}
+@keyframes kv-stream-sweep {
+  0% { fill-opacity: 0.28; transform: scale(0.72); }
+  24% { fill-opacity: 0.34; transform: scale(0.78); }
+  50% { fill-opacity: 1; transform: scale(1.24); }
+  76%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .kv-stream-dot-logo { animation: none; opacity: 1; }
+  .kv-stream-dot-logo .dt { animation: none; transform: none; fill-opacity: 1; }
 }
 
 .chat-conversation-loading {
