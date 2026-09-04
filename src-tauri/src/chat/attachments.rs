@@ -729,7 +729,7 @@ fn decoded_base64_len(payload: &str) -> usize {
 /// 用已有的 `image` crate 生成 PNG 缩略图的内联 data URL。解码/编码失败返回 None。
 /// 也被 `native_tools::sandbox_exports` 用于成果卡：图片在出生点就只内联缩略图。
 pub(crate) fn make_thumbnail_data_url(bytes: &[u8]) -> Option<String> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let img = super::image_prep::decode_oriented(bytes)?;
     let thumb = img.thumbnail(ARTIFACT_THUMBNAIL_MAX_DIM, ARTIFACT_THUMBNAIL_MAX_DIM);
     let mut buf = Cursor::new(Vec::new());
     thumb.write_to(&mut buf, image::ImageFormat::Png).ok()?;

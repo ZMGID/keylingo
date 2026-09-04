@@ -75,6 +75,11 @@ pub async fn tool_generate_image(
     let conversation = conversation_id.and_then(|conversation_id| {
         crate::chat::storage::load_conversation(app, conversation_id).ok()
     });
+    let drafts = conversation_id
+        .map(|conversation_id| {
+            crate::chat::draft_journal::latest_drafts_for(app, conversation_id)
+        })
+        .unwrap_or_default();
     let session_ref = conversation
         .as_ref()
         .map(|conversation| crate::settings::SessionModel {
@@ -89,7 +94,8 @@ pub async fn tool_generate_image(
         .cloned()
         .ok_or_else(|| "Mixer image generation provider is missing".to_string())?;
     let retry_attempts = crate::api::effective_retry_attempts(&settings);
-    let input_images = collect_mixer_input_images(app, conversation.as_ref(), arguments)?;
+    let input_images =
+        collect_mixer_input_images(app, conversation.as_ref(), &drafts, arguments)?;
     generate_image_with_provider(
         state,
         &provider,
@@ -1284,8 +1290,12 @@ fn load_input_image_from_path(path: &Path) -> Result<InputImage, String> {
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err("Input image is too large".to_string());
     }
+    let (bytes, mime_type) = match super::image_prep::prepare_image_bytes_for_model(&bytes) {
+        Some((prepared, mime)) => (prepared, mime.to_string()),
+        None => (bytes, mime_for_image_path(path).to_string()),
+    };
     Ok(InputImage {
-        mime_type: mime_for_image_path(path).to_string(),
+        mime_type,
         base64: general_purpose::STANDARD.encode(bytes),
     })
 }
@@ -1311,6 +1321,7 @@ fn mime_for_image_path(path: &Path) -> &'static str {
 fn collect_mixer_input_images(
     app: &AppHandle,
     conversation: Option<&crate::chat::Conversation>,
+    drafts: &[crate::chat::ChatMessage],
     arguments: &Value,
 ) -> Result<Vec<InputImage>, String> {
     let artifact_ids = string_list_arg(arguments, "artifact_ids");
@@ -1318,18 +1329,14 @@ fn collect_mixer_input_images(
     let mut images = Vec::new();
     let mut missing = Vec::new();
 
+    let artifacts = resolve_mixer_artifacts(conversation, drafts, &artifact_ids)?;
     if let Some(conversation) = conversation {
-        for id in &artifact_ids {
-            match find_conversation_artifact(conversation, id)
-                .ok_or_else(|| format!("Unknown artifact_id: {id}"))
-                .and_then(|artifact| input_image_from_artifact(app, &conversation.id, artifact))
-            {
+        for artifact in artifacts {
+            match input_image_from_artifact(app, &conversation.id, artifact) {
                 Ok(image) => push_input_image(&mut images, image),
                 Err(err) => missing.push(err),
             }
         }
-    } else if !artifact_ids.is_empty() {
-        return Err("artifact_ids require an active conversation".to_string());
     }
 
     for path in &paths {
@@ -1341,15 +1348,11 @@ fn collect_mixer_input_images(
         }
     }
 
-    if !images.is_empty() {
-        return Ok(images);
-    }
     if !artifact_ids.is_empty() || !paths.is_empty() {
-        return Err(if missing.is_empty() {
-            "No readable input images".to_string()
-        } else {
-            missing.join("; ")
-        });
+        if !missing.is_empty() {
+            return Err(missing.join("; "));
+        }
+        return Ok(images);
     }
 
     let Some(conversation) = conversation else {
@@ -1401,11 +1404,36 @@ fn push_input_image(images: &mut Vec<InputImage>, image: InputImage) {
     images.push(image);
 }
 
-fn find_conversation_artifact<'a>(
-    conversation: &'a crate::chat::Conversation,
-    artifact_id: &str,
-) -> Option<&'a ChatToolArtifact> {
-    conversation.messages.iter().find_map(|message| {
+fn resolve_mixer_artifacts<'a>(
+    conversation: Option<&'a crate::chat::Conversation>,
+    drafts: &'a [crate::chat::ChatMessage],
+    artifact_ids: &[String],
+) -> Result<Vec<&'a ChatToolArtifact>, String> {
+    if artifact_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(conversation) = conversation else {
+        return Err("artifact_ids require an active conversation".to_string());
+    };
+    let mut found = Vec::new();
+    let mut missing = Vec::new();
+    for id in artifact_ids {
+        match find_artifact_in_messages(drafts.iter().chain(conversation.messages.iter()), id) {
+            Some(artifact) => found.push(artifact),
+            None => missing.push(format!("Unknown artifact_id: {id}")),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(missing.join("; "));
+    }
+    Ok(found)
+}
+
+fn find_artifact_in_messages<'a, I>(messages: I, artifact_id: &str) -> Option<&'a ChatToolArtifact>
+where
+    I: IntoIterator<Item = &'a crate::chat::ChatMessage>,
+{
+    messages.into_iter().find_map(|message| {
         message
             .artifacts
             .iter()
@@ -2060,6 +2088,79 @@ mod tests {
             b"fake-jpeg-bytes"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn conversation_from_messages(messages: Vec<Value>) -> crate::chat::Conversation {
+        serde_json::from_value(serde_json::json!({
+            "id": "conv_1",
+            "title": "t",
+            "provider_id": "p",
+            "model": "m",
+            "messages": messages,
+            "created_at": 0,
+            "updated_at": 0,
+        }))
+        .expect("conversation")
+    }
+
+    fn assistant_with_tool_artifact(artifact_id: &str, b64: &str) -> Value {
+        serde_json::json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "content": "",
+            "timestamp": 0,
+            "tool_calls": [{
+                "id": "tc_1",
+                "name": "mixer_generate_image",
+                "status": "success",
+                "artifacts": [{
+                    "id": artifact_id,
+                    "name": "generated-image-1.png",
+                    "mime_type": "image/png",
+                    "data_url": format!("data:image/png;base64,{b64}"),
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn mixer_finds_same_turn_artifact_on_draft_not_main_json() {
+        let conversation = conversation_from_messages(vec![]);
+        let drafts: Vec<crate::chat::ChatMessage> = vec![serde_json::from_value(
+            assistant_with_tool_artifact("art_new", "aGVsbG8="),
+        )
+        .expect("draft")];
+        let found = resolve_mixer_artifacts(
+            Some(&conversation),
+            &drafts,
+            &["art_new".to_string()],
+        )
+        .expect("draft artifact");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.as_deref(), Some("art_new"));
+    }
+
+    #[test]
+    fn mixer_unknown_artifact_errors_even_if_another_image_is_known() {
+        let conversation = conversation_from_messages(vec![assistant_with_tool_artifact(
+            "art_old",
+            "aGVsbG8=",
+        )]);
+        let err = resolve_mixer_artifacts(
+            Some(&conversation),
+            &[],
+            &["art_old".to_string(), "art_new".to_string()],
+        )
+        .expect_err("must not silently drop the missing id");
+        assert!(err.contains("art_new"), "{err}");
+        assert!(!err.contains("art_old") || err.contains("Unknown artifact_id: art_new"));
+    }
+
+    #[test]
+    fn mixer_artifact_ids_require_a_conversation() {
+        let err = resolve_mixer_artifacts(None, &[], &["art_new".to_string()])
+            .expect_err("no conversation");
+        assert!(err.contains("active conversation"), "{err}");
     }
 
     #[test]

@@ -44,21 +44,27 @@ pub(super) fn decode_oriented(bytes: &[u8]) -> Option<DynamicImage> {
 }
 
 /// 入口降采样：返回 `Some((jpeg_bytes, "image/jpeg"))` 表示已处理，`None` 表示
-/// 原字节直接可用（尺寸/体积都在界内，或根本解不出来——直通是唯一安全的降级）。
+/// 原字节直接可用（尺寸/体积都在界内且无需 EXIF 旋转，或根本解不出来——直通是唯一安全的降级）。
 pub(super) fn prepare_image_bytes_for_model(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    // 先只读头部拿尺寸，避免为了「本来就合规」的图付一次全量解码。
-    // 头部是存储像素尺寸，不含 EXIF 旋转；小图直通会把 EXIF 留给模型自己处理。
-    let (width, height) = image::ImageReader::new(Cursor::new(bytes))
+    // 只开 decoder 读尺寸 + Orientation，避免「本来就合规」的图付一次全量像素解码。
+    // 头部尺寸不含 EXIF 旋转；有 Orientation 就必须落地转正——JPEG 重编码会丢掉 EXIF，
+    // 多数模型也不自己转，小图直通会把手机竖拍侧着送进去。
+    let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .ok()?
-        .into_dimensions()
         .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let (width, height) = decoder.dimensions();
     let header_within_dims = width <= MODEL_IMAGE_MAX_DIM && height <= MODEL_IMAGE_MAX_DIM;
-    if header_within_dims && bytes.len() <= MODEL_IMAGE_TARGET_BYTES {
+    let needs_orient = orientation != image::metadata::Orientation::NoTransforms;
+    if !needs_orient && header_within_dims && bytes.len() <= MODEL_IMAGE_TARGET_BYTES {
         return None;
     }
 
-    let decoded = decode_oriented(bytes)?;
+    let mut decoded = DynamicImage::from_decoder(decoder).ok()?;
+    decoded.apply_orientation(orientation);
     let resized =
         if decoded.width() <= MODEL_IMAGE_MAX_DIM && decoded.height() <= MODEL_IMAGE_MAX_DIM {
             decoded
@@ -200,6 +206,40 @@ mod tests {
         app1.extend_from_slice(&exif);
         jpeg.splice(2..2, app1);
         jpeg
+    }
+
+    #[test]
+    fn small_jpeg_exif_orientation_6_is_rotated_not_passed_through() {
+        // 典型压缩后的手机竖拍：存储像素在 2000px/2MB 内，旧逻辑会直通，把 EXIF 留给模型。
+        let img = RgbImage::from_fn(400, 200, |_, y| {
+            if y < 20 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 255, 0])
+            }
+        });
+        let jpeg = jpeg_with_exif_orientation(&img, 6);
+        assert!(jpeg.len() <= MODEL_IMAGE_TARGET_BYTES);
+        let (out, mime) = prepare_image_bytes_for_model(&jpeg)
+            .expect("in-bound phone JPEG with Orientation=6 must be re-encoded upright");
+        assert_eq!(mime, "image/jpeg");
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        assert!(
+            decoded.height() > decoded.width(),
+            "EXIF 6 should yield a portrait, got {}x{}",
+            decoded.width(),
+            decoded.height()
+        );
+        let right = decoded.get_pixel(decoded.width() - 2, decoded.height() / 2);
+        let top = decoded.get_pixel(decoded.width() / 2, 2);
+        assert!(
+            right[0] > 200 && right[1] < 80,
+            "right edge should be the former top (red), got {right:?}"
+        );
+        assert!(
+            top[1] > 200 && top[0] < 80,
+            "top edge should be the former left (green), got {top:?}"
+        );
     }
 
     #[test]

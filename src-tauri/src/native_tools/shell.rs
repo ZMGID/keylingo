@@ -46,6 +46,8 @@ const LONG_RUNNING_DEV_PATTERNS: &[&str] = &[
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 
 fn apply_shell_tool_env(cmd: &mut Command, state: Option<&AppState>) {
     // 环境净化（对齐 codex 等）：关掉彩色输出与交互式分页，让给模型读的命令输出更干净。
@@ -640,6 +642,29 @@ pub struct BackgroundCommand {
 /// process group then SIGKILL as a fallback. Windows: `taskkill /T /F` walks the
 /// child tree. macOS+Linux both spawn the group via `setsid`, so `-pid` targets
 /// the whole group.
+/// Dropped while still armed (user Stop / select cancel) → kill the process
+/// tree. `kill_on_drop` on the `Child` only reaps the shell leader.
+struct KillProcessGroupOnDrop {
+    pid: Option<u32>,
+    armed: bool,
+}
+
+impl KillProcessGroupOnDrop {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for KillProcessGroupOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(pid) = self.pid {
+                kill_process_group(pid);
+            }
+        }
+    }
+}
+
 pub fn kill_process_group(pid: u32) {
     #[cfg(unix)]
     {
@@ -693,7 +718,6 @@ async fn run_shell_command_background(
     apply_shell_tool_env(&mut cmd, state);
     #[cfg(target_os = "windows")]
     {
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         // 只用 CREATE_NO_WINDOW（+ 新进程组，便于 taskkill /T 按树杀）：cmd.exe 拿到隐藏
         // 控制台，其 npm/vite/electron 子孙进程继承该隐藏控制台 → 全程无可见窗口。
         // 不要叠加 DETACHED_PROCESS：按 MSDN，它与 CREATE_NO_WINDOW 同设会使后者失效，
@@ -1042,9 +1066,14 @@ async fn exec_shell_command(
     apply_shell_tool_env(&mut cmd, state);
     #[cfg(target_os = "windows")]
     {
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        // 与后台路径同一组旗标：用户 Stop 会 drop 这个 future，KillProcessGroupOnDrop
+        // 走 taskkill /T，必须能按树杀掉 npm/python 子孙，不能只杀 cmd/powershell 组长。
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
-    cmd.kill_on_drop(true);
+    // 必须 false：async 取消时 `wait` 与 guard 的 drop 顺序不保证。若 Child 先
+    // kill_on_drop 只杀掉组长，子孙会被系统过继，随后的 taskkill /T 就找不到树。
+    // 统一交给 KillProcessGroupOnDrop（成功/超时路径会 disarm）。
+    cmd.kill_on_drop(false);
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
@@ -1061,16 +1090,23 @@ async fn exec_shell_command(
     let child_pid = child.id();
     let wait = child.wait_with_output();
     tokio::pin!(wait);
+    // Declared after `wait` so cancel-drop kills the tree before Child drop.
+    let mut kill_on_cancel = KillProcessGroupOnDrop {
+        pid: child_pid,
+        armed: true,
+    };
 
     let output = if let Some(timeout_ms) = timeout_ms {
         tokio::select! {
             result = &mut wait => {
+                kill_on_cancel.disarm();
                 result.map_err(|err| format!("Command failed: {err}"))?
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
                 if let Some(pid) = child_pid {
                     kill_process_group(pid);
                 }
+                kill_on_cancel.disarm();
                 return match tokio::time::timeout(std::time::Duration::from_secs(2), wait).await {
                     Ok(Ok(output)) => Err(format_timeout_with_partial(timeout_ms, &output)),
                     Ok(Err(err)) => Err(format!(
@@ -1083,8 +1119,11 @@ async fn exec_shell_command(
             }
         }
     } else {
-        wait.await
-            .map_err(|err| format!("Command failed: {err}"))?
+        let result = wait
+            .await
+            .map_err(|err| format!("Command failed: {err}"))?;
+        kill_on_cancel.disarm();
+        result
     };
 
     Ok(CommandOutput {
@@ -2017,6 +2056,114 @@ mod tests {
         assert!(
             err.to_lowercase().contains("started"),
             "partial stdout should survive the kill: {err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn read_pid_file(path: &Path) -> Option<u32> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        raw.trim()
+            .trim_start_matches('\u{feff}')
+            .parse()
+            .ok()
+    }
+
+    fn process_is_running(pid: u32) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt as _;
+            let output = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            match output {
+                Ok(out) => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    !text.to_ascii_lowercase().contains("no tasks")
+                        && text.contains(&pid.to_string())
+                }
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Path::new(&format!("/proc/{pid}")).exists()
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_cancel_kills_process_tree() {
+        let dir = std::env::temp_dir().join(format!("kivio_cancel_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let child_pid_path = dir.join("child.pid");
+        let leader_pid_path = dir.join("leader.pid");
+        #[cfg(not(target_os = "windows"))]
+        let child_path = child_pid_path.to_string_lossy().replace('\\', "/");
+        #[cfg(not(target_os = "windows"))]
+        let leader_path = leader_pid_path.to_string_lossy().replace('\\', "/");
+
+        // Windows 固定走 PowerShell：Git Bash 的 `$!` 是 MSYS pid，tasklist 对不上。
+        #[cfg(target_os = "windows")]
+        let fut = {
+            let pid_out = child_pid_path.display().to_string().replace('\'', "''");
+            let leader_out = leader_pid_path.display().to_string().replace('\'', "''");
+            // UseShellExecute=$false：跟 cmd 拉起 npm/python 一样是真 CreateProcess 子进程。
+            // Start-Process 默认走 shell 启动，taskkill /T 对不上那棵树。
+            let command = format!(
+                "[System.IO.File]::WriteAllText('{leader_out}', [string]$PID); $si = New-Object System.Diagnostics.ProcessStartInfo; $si.FileName = \"$env:SystemRoot\\System32\\ping.exe\"; $si.Arguments = '-n 80 127.0.0.1'; $si.UseShellExecute = $false; $si.CreateNoWindow = $true; $p = [System.Diagnostics.Process]::Start($si); [System.IO.File]::WriteAllText('{pid_out}', [string]$p.Id); $p.WaitForExit()"
+            );
+            exec_shell_command(
+                build_windows_powershell_command(&command),
+                dir.clone(),
+                None,
+                None,
+            )
+        };
+        #[cfg(not(target_os = "windows"))]
+        let fut = {
+            let command = format!(
+                "echo $$ > '{leader_path}'; sleep 60 & echo $! > '{child_path}'; sleep 60"
+            );
+            exec_shell_command(build_shell_command(&command), dir.clone(), None, None)
+        };
+        // spawn+abort 才会真正 drop future；`tokio::pin!` 后 `drop(pin)` 只丢掉指针。
+        let mut handle = tokio::spawn(fut);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+        let child_pid = loop {
+            if let Some(pid) = read_pid_file(&child_pid_path) {
+                break pid;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                handle.abort();
+                let _ = handle.await;
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("child pid file was not written");
+            }
+            tokio::select! {
+                result = &mut handle => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    panic!("command exited before cancel: {result:?}");
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        };
+        if !process_is_running(child_pid) {
+            handle.abort();
+            let _ = handle.await;
+            panic!("grandchild {child_pid} should be alive before cancel");
+        }
+        handle.abort();
+        let _ = handle.await;
+        let died_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while process_is_running(child_pid) && tokio::time::Instant::now() < died_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let leader_pid = read_pid_file(&leader_pid_path);
+        let leader_alive = leader_pid.is_some_and(process_is_running);
+        assert!(
+            !process_is_running(child_pid),
+            "grandchild pid {child_pid} should die when the foreground future is dropped (leader {leader_pid:?} alive={leader_alive})"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

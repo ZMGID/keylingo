@@ -122,6 +122,18 @@ async fn recover_one(app: &AppHandle, conversation_id: &str, path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+/// 读当前会话的草稿日志（每个 message_id 最后一行）。日志不存在或读失败时返回空。
+/// 给同轮工具（例如 mixer 改图）查找主 JSON 里还没有的 artifact。
+pub(crate) fn latest_drafts_for(app: &AppHandle, conversation_id: &str) -> Vec<ChatMessage> {
+    let Ok(path) = storage::draft_journal_path(app, conversation_id) else {
+        return Vec::new();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    latest_drafts_per_message(&content)
+}
+
 /// 解析日志:每个 message_id 取最后一行(自包含快照,后写覆盖先写),
 /// 保持首次出现的顺序;坏行(崩溃时写了半行)跳过。
 fn latest_drafts_per_message(content: &str) -> Vec<ChatMessage> {
