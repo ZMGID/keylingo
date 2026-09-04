@@ -140,7 +140,15 @@ type RenderItem =
   | { kind: 'message'; key: string; message: ChatMessage; sentModels?: GroupModelLabel[] }
   | { kind: 'group'; key: string; groupId: string; messages: ChatMessage[] }
   | { kind: 'live-group'; key: string; groupId: string }
-  | { kind: 'streaming'; key: string; message: ChatMessage; messageStreaming: boolean; reasoningStreaming: boolean }
+  | {
+    kind: 'streaming'
+    key: string
+    message: ChatMessage
+    messageStreaming: boolean
+    /** Markdown 上下文是否仍按「出字中」处理（见 MessageBubble.markdownStreaming）。 */
+    markdownStreaming: boolean
+    reasoningStreaming: boolean
+  }
   | { kind: 'error'; key: 'error'; text: string; retryMessageId: string | null }
   | { kind: 'tail'; key: 'tail' }
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
@@ -271,6 +279,11 @@ function MessageListBase({
   // Last measured outside-live height; filled every streaming layout, consumed on settle seed.
   const liveBubbleHeightRef = useRef(0)
   const lastLiveMessageRef = useRef<ChatMessage | null>(null)
+  // settle 帧种子的**按消息 id** 版本。持久缓存的 key 带 layoutRevision，而 twin 首次进入
+  // virtualizer 的那次 render 里消息对象可能已被替换（usage / stream_outcome 到位 → 页脚
+  // revision 变），key 对不上就退回字符估高（探针：估 375 vs 实 338，钉底 scrollTop
+  // 147→185→147 抖一帧）。按 id 存一份只活到该行真正被测量为止，estimateSize 优先取它。
+  const settleSeedByIdRef = useRef(new Map<string, number>())
 
   const error = coarse.streamError
   const streamingContent = snapshot.content
@@ -659,6 +672,11 @@ function MessageListBase({
       kind: 'streaming',
       key: liveRowKey,
       messageStreaming: streaming && !streamFrozen,
+      // 冻结帧（settle 等 twin 落地 / 本地取消等 invoke 返回）里 Markdown 上下文保持
+      // 「出字中」：mermaid 继续显示源码、岛保持 eager，把源码→出图这类内容变化留给
+      // twin 首挂一次完成，而不是 live 行先变一次、twin 再变一次。出错后长期停留的冻结
+      // 预览没有 twin 来接手，才切回落库态，让 mermaid 出图、控件可用。
+      markdownStreaming: streaming || !error,
       reasoningStreaming: reasoningStreaming && !streamFrozen,
       message: {
         // Prefer real message id when known so context-menu / navigator can target it;
@@ -674,6 +692,7 @@ function MessageListBase({
       },
     }
   }, [
+    error,
     liveGroup,
     liveRowActive,
     liveRowKey,
@@ -794,10 +813,14 @@ function MessageListBase({
     if (settlingId) {
       const settling = messages.find((message) => message.id === settlingId)
       const liveMessage = lastLiveMessageRef.current
-      if (settling && liveMessage && canReuseLiveRowHeight(liveMessage, settling)) {
-        const rid = liveRowModel.resolveMessageKey(settling.id)
+      if (settling) {
         const h = Math.round(liveBubbleHeightRef.current)
-        setCachedRowMeasurement(layoutKey, `${rid}:${chatMessageLayoutRevision(settling)}`, h)
+        // 正文不同（罕见）时 live 实高仍比字符估高准得多，照样按 id 种；measureElement 下帧纠正。
+        settleSeedByIdRef.current.set(settling.id, h)
+        if (liveMessage && canReuseLiveRowHeight(liveMessage, settling)) {
+          const rid = liveRowModel.resolveMessageKey(settling.id)
+          setCachedRowMeasurement(layoutKey, `${rid}:${chatMessageLayoutRevision(settling)}`, h)
+        }
       }
     }
   }
@@ -888,6 +911,10 @@ function MessageListBase({
     estimateSize: (index) => {
       const item = itemAt(index)
       if (!item) return 96
+      if (item.kind === 'message') {
+        const seeded = settleSeedByIdRef.current.get(item.message.id)
+        if (seeded !== undefined) return seeded
+      }
       const cached = estimateSizeRef.current.get(item.key)
       if (cached !== undefined) return cached
       // Live tail: prefer last measured height under the stable live key.
@@ -917,7 +944,10 @@ function MessageListBase({
         const size = Math.max(1, measured)
         const index = Number(element.dataset.index)
         const virtualKey = Number.isInteger(index) ? instance.options.getItemKey(index) : key
-        const logicalKey = Number.isInteger(index) ? itemAt(index)?.key : undefined
+        const rowItem = Number.isInteger(index) ? itemAt(index) : undefined
+        const logicalKey = rowItem?.key
+        // 真身量到了，settle 种子退场（不然换宽度重开会话时还会拿旧种子当估高）。
+        if (rowItem?.kind === 'message') settleSeedByIdRef.current.delete(rowItem.message.id)
         const previousSize = instance.itemSizeCache.get(virtualKey)
         if (previousSize === undefined || Math.abs(previousSize - size) > 0.5) {
           // Remeasure compensation. External live never hits this for token growth.
@@ -1778,6 +1808,7 @@ function MessageListBase({
   const reserveHandoffRef = useRef(false)
   useLayoutEffect(() => {
     reserveHandoffRef.current = false
+    settleSeedByIdRef.current.clear()
   }, [conversationId])
   useLayoutEffect(() => {
     const wrap = tailWrapRef.current
@@ -1921,6 +1952,7 @@ function MessageListBase({
               message={item.message}
               conversationId={conversationId}
               messageStreaming={item.messageStreaming}
+              markdownStreaming={item.markdownStreaming}
               reasoningStreaming={item.reasoningStreaming}
               reasoningDurationMs={streamingReasoningDurationMs}
               reasoningDurationMsBySegmentId={streamingReasoningDurationMsBySegmentId}

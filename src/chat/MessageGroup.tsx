@@ -163,6 +163,9 @@ function GroupColumnView({
             message={message}
             conversationId={conversationId}
             messageStreaming={streaming}
+            // 实时列先结束的臂保持「出字中」上下文（mermaid 源码 / eager 岛不在原地翻转）；
+            // 这些内容变化留给落库后的 group twin 首挂一次完成。
+            markdownStreaming={live || streaming}
             // 性能降级（R10）：非聚焦列把 reasoningStreaming 置 false，让 ReasoningBlock 折叠
             // 并把思维链正文从 DOM 卸载（hideBody）；聚焦列正常展示流式思考。
             reasoningStreaming={streaming && isFocused}
@@ -180,6 +183,7 @@ function GroupColumnView({
           message={message}
           conversationId={conversationId}
           messageStreaming={streaming}
+          markdownStreaming={live || streaming}
           // tabs 模式：当前显示列即聚焦列 → 正常展示流式思考。
           reasoningStreaming={streaming && isFocused}
           onUpdateMessage={!live ? onUpdateMessage : undefined}

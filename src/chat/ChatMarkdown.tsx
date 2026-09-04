@@ -746,8 +746,11 @@ function HtmlCodePreview({ html }: { html: string }) {
 }
 
 function MarkdownPre({ children }: { children?: ReactNode }) {
-  // 流式中避免 ChatHeavyIsland 延迟 hydrate：fallback(112px) → 真代码块 的高度跳变
-  // 会在贴底 pin 之后再撑开，整段生成内容看起来「往下闪」一下。
+  // 流式与落库走**同一个** DeferredCodeBlock 外壳：流式下它 eager（`eager={streaming}`，
+  // useState 初始化就 hydrated，没有 fallback 112px → 真身的高度跳变），但 island 的
+  // 包装 div 与历史气泡一致。之前流式直接渲染裸 <figure>，settle 后 twin 多一层 div，
+  // figure 的 my-3 与根 space-y-4 的外边距折叠结果不同（下边 12px vs 16px），每个代码块
+  // 差 4px，长回答在生成结束那一刻整篇往下挪。
   const streaming = useContext(MarkdownStreamingContext)
   const child = Array.isArray(children) ? children[0] : children
   if (isValidElement<{ className?: string; children?: unknown }>(child)) {
@@ -765,10 +768,8 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
     if (language === 'kivio-error-details') {
       return <ErrorDetails detail={code} />
     }
-    if (streaming) return <CodeBlock code={code} language={language} />
     return <DeferredCodeBlock code={code} language={language} />
   }
-  if (streaming) return <CodeBlock code={codeChildrenToString(children)} language="" />
   return <DeferredCodeBlock code={codeChildrenToString(children)} language="" />
 }
 
@@ -1129,16 +1130,15 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
 
   // Streamdown streaming 模式对「非前缀扩展」的整段替换可能卡住旧块（如 frame 0→frame 1）。
   // 真实流式几乎总是前缀增长；一旦不是，换 key 强制重挂，避免 DOM 停在旧正文。
+  // 现在落库后也留在 streaming 模式，所以非流式期间的整段替换（编辑 / 重新生成落库）
+  // 同样要换 key —— 判据只看内容是否前缀增长，不看 streaming 上下文。
   const streamEpochRef = useRef(0)
   const prevStreamContentRef = useRef(content)
-  if (streaming) {
+  {
     const prev = prevStreamContentRef.current
     if (prev && content !== prev && !content.startsWith(prev)) {
       streamEpochRef.current += 1
-
     }
-    prevStreamContentRef.current = content
-  } else {
     prevStreamContentRef.current = content
   }
   const streamEpoch = streamEpochRef.current
@@ -1147,12 +1147,22 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
   // - 流式消息固定走 Streamdown streaming 模式（块级 memo + parseIncomplete），
   //   不要在每个 token 上整篇 static 重解析——那会放大行高抖动。
   // - isAnimating 跟「还在出字」绑定；animated 始终 false（不做字级动画）。
-  // - 模式只由 streaming 上下文决定；settled 后才切 static，避免中途整树重挂。
+  // - ⚠️ **落库后也不切 static。** 两种模式不是同一套解析：streaming 先按块切开、每块单独
+  //   跑一遍 react-markdown，static 整篇一次解析。跨块的语法（隔空行的松散列表、引用式链接、
+  //   脚注、续在空行后的表格……）两边结果不一样，同一段正文在 live 与落库 twin 上就会
+  //   排出两种样子 —— 用户看到的「生成完格式变一下」即来源于此，而且不是靠对齐外壳 DOM
+  //   能消掉的。要求是「流式生成时什么样，最终就是什么样」，所以整条消息终身用同一种
+  //   模式；key 也不再随 streaming 翻转，避免结束帧整树重挂。代价是历史消息也按块解析
+  //   （块级 memo，成本与流式末帧一致），对 react-markdown 来说每块都是完整文档，可接受。
   return (
     <Streamdown
-      key={streaming ? `stream-${streamEpoch}` : 'static'}
-      mode={streaming ? 'streaming' : 'static'}
-      dir="auto"
+      key={`stream-${streamEpoch}`}
+      mode="streaming"
+      // ⚠️ 不传 dir。Streamdown 一旦拿到 dir（含 "auto"），streaming 模式会把**每个块**包进
+      // `<div dir style="display:contents">`，而 static 模式直接平铺元素。根上的 `space-y-4`
+      // 与 `[&>*:first-child]:mt-0` 打在 display:contents 包装层上是无效的（它不生成盒子），
+      // 于是流式中段落之间没有 16px 间距、首个标题保留 mt-6，落库 twin 一挂就整篇重排 ——
+      // 「生成结束格式变了一下」。文字方向交给外层 shell 的原生 dir="auto"（按首个强方向字符）。
       parseIncompleteMarkdown
       normalizeHtmlIndentation
       plugins={streamdownPlugins}
@@ -1226,7 +1236,7 @@ function ChatMarkdownComponent({
   }, [artifacts, conversationId, onImageClick, citations])
 
   return (
-    <div className={markdownShellClass(variant)}>
+    <div className={markdownShellClass(variant)} dir="auto">
       <MarkdownErrorBoundary fallbackText={content}>
         <FullSettledMarkdown
           content={content}

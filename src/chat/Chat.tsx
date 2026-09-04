@@ -137,6 +137,7 @@ import {
 import { isPlaceholderTitle, optimisticConversationTitle } from './conversationTitle'
 import {
   getCoarse as getStreamCoarse,
+  getSnapshot as getStreamSnapshot,
   patchSnapshot as patchStreamSnapshot,
   reset as resetStreamStore,
   setCoarse as setStreamCoarse,
@@ -814,7 +815,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const restoredRunIdsRef = useRef<Set<string>>(new Set())
   const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
   /** run 结束但落库 twin 尚未随 startTransition 提交时，冻结的预览等它落地再清（防收尾闪帧）。 */
-  const pendingPreviewClearRef = useRef<{ conversationId: string; messageId: string | null } | null>(null)
+  const pendingPreviewClearRef = useRef<{
+    conversationId: string
+    messageId: string | null
+    /** 冻结时已提交的 messages 引用；twinId 未知时，引用一变即视为 twin 落地。 */
+    committedMessages: ChatMessage[]
+  } | null>(null)
   /** 写 ref 不触发渲染；这个 epoch 保证挂起标记一旦设置，落地 effect 至少跑一次（武装超时兜底）。 */
   const [previewClearEpoch, setPreviewClearEpoch] = useState(0)
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
@@ -1047,17 +1053,30 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
    * twin 真正落地再清，live→twin 就是同一 commit 的原子交换。
    */
   const settleStreamingPreview = useCallback((conversationId: string) => {
-    const snapshot = streamSnapshotsRef.current[conversationId]
-    const twinId = snapshot?.messageId ?? null
-    const twinLanded = !twinId
-      || (currentConversationRef.current?.messages ?? []).some((m) => m.id === twinId)
-    if (!twinLanded && freezeStreamSnapshot(conversationId)) {
-      pendingPreviewClearRef.current = { conversationId, messageId: twinId }
-      setPreviewClearEpoch((value) => value + 1)
-    } else {
+    // ⚠️ 只看 store（屏幕上正在展示的 live 预览），不读 streamSnapshotsRef：两条收尾路径
+    // （finishStreamingRun / finishStreamingRunWithConversation）都在调用这里**之前**
+    // clearConversationLocalState 把 ref 里的快照删了，从 ref 取 twinId 永远是 null →
+    // 被判成「已落地」→ 直接 clear → 冻结路径从未生效，闪帧一直在（探针实测：无 frozen 帧，
+    // live 卸载与 twin 挂载差一帧，scrollTop 195→503→263）。
+    const shown = getStreamSnapshot()
+    if (!hasStreamPreview(shown)) {
       clearStreamingPreview()
+      return
     }
-  }, [clearStreamingPreview, freezeStreamSnapshot])
+    const committed = currentConversationRef.current?.messages ?? []
+    const twinId = shown.messageId ?? null
+    if (twinId && committed.some((m) => m.id === twinId)) {
+      clearStreamingPreview()
+      return
+    }
+    // 冻结：停动画、留 live 气泡在原地（SyncLane 先上屏也无害），等 twin 真正提交再清。
+    // twinId 未知（run 事件没带 messageId）时按「已提交 messages 引用变化」判落地。
+    cancelPendingFrame()
+    patchStreamSnapshot({ streaming: false, reasoningStreaming: false })
+    setStreamCoarse({ streaming: false, streamFrozen: true, cancelling: false })
+    pendingPreviewClearRef.current = { conversationId, messageId: twinId, committedMessages: committed }
+    setPreviewClearEpoch((value) => value + 1)
+  }, [cancelPendingFrame, clearStreamingPreview])
 
   const ensureStreamSnapshot = useCallback((conversationId: string) => {
     const existing = streamSnapshotsRef.current[conversationId]
@@ -1951,7 +1970,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
     const landed = pending.messageId
       ? (currentConversation?.messages ?? []).some((m) => m.id === pending.messageId)
-      : true
+      : (currentConversation?.messages ?? []) !== pending.committedMessages
     if (landed) {
       pendingPreviewClearRef.current = null
       clearStreamingPreview()

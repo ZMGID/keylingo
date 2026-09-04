@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { MessageBubble } from './MessageBubble'
@@ -23,6 +23,53 @@ describe('MessageBubble mount motion', () => {
   it('keeps entrance motion for the live streaming preview', () => {
     const { container } = render(<MessageBubble message={assistantMessage} messageStreaming />)
     expect(container.firstElementChild).toHaveClass('chat-motion-bubble-in')
+  })
+
+  // settle 冻结帧：messageStreaming 翻 false 但 live 行还在。Markdown 若跟着切 static，
+  // Streamdown 整树重挂、代码块退回未高亮 fallback（180ms 后再补）——「生成完闪一下」。
+  it('keeps live markdown in streaming mode on the frozen frame when markdownStreaming stays true', async () => {
+    const message: ChatMessage = {
+      id: 'assistant-frozen',
+      role: 'assistant',
+      content: '前言\n\n```ts\nconst x = 1\n```\n\n```py\nprint(1)\n```',
+      timestamp: 1,
+    }
+    const { container, rerender } = render(<MessageBubble message={message} messageStreaming markdownStreaming />)
+    await act(async () => { await Promise.resolve() })
+    const liveCodes = [...container.querySelectorAll('figure pre code')]
+    expect(liveCodes).toHaveLength(2)
+    const liveSpanCount = liveCodes.reduce((n, code) => n + code.querySelectorAll('span').length, 0)
+    expect(liveSpanCount).toBeGreaterThan(0)
+
+    rerender(<MessageBubble message={message} messageStreaming={false} markdownStreaming />)
+    await act(async () => { await Promise.resolve() })
+    // 没退回 fallback：island 仍是 hydrated，高亮 span 原样保留，代码块 DOM 节点也没换。
+    expect(container.querySelector('[data-chat-heavy-hydrated="false"]')).toBeNull()
+    const frozenCodes = [...container.querySelectorAll('figure pre code')]
+    expect(frozenCodes).toEqual(liveCodes)
+    expect(frozenCodes.reduce((n, code) => n + code.querySelectorAll('span').length, 0)).toBe(liveSpanCount)
+  })
+
+  // 曾经 messageStreaming 翻 false 会把 Streamdown 切成 static 模式并换 key，整树重挂、
+  // 代码块退回未 hydrate 的 fallback（就是「生成完闪一下」）。现在 Markdown 终身留在
+  // streaming 模式、key 不随 streaming 翻转，这个翻转不再触碰已挂载的岛。
+  it('keeps code blocks hydrated when messageStreaming flips to false (no static remount)', async () => {
+    const message: ChatMessage = {
+      id: 'assistant-static-switch',
+      role: 'assistant',
+      content: '```ts\nconst x = 1\n```',
+      timestamp: 1,
+    }
+    const { container, rerender } = render(<MessageBubble message={message} messageStreaming />)
+    await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('[data-chat-heavy-island="true"]')?.getAttribute('data-chat-heavy-hydrated')).toBe('true')
+
+    const before = container.querySelector('[data-chat-heavy-island="true"]')
+    rerender(<MessageBubble message={message} messageStreaming={false} />)
+    await act(async () => { await Promise.resolve() })
+    const island = container.querySelector('[data-chat-heavy-island="true"]')
+    expect(island).toBe(before)
+    expect(island?.getAttribute('data-chat-heavy-hydrated')).toBe('true')
   })
 
   // 元信息条 hover 显隐：鼠标在这条消息上显示、移走隐藏。React 合成 pointer 事件挂在

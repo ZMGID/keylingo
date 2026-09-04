@@ -48,6 +48,43 @@ describe('message layout revision', () => {
     expect(canReuseLiveRowHeight(live, assistant())).toBe(true)
   })
 
+  it('有时间线分段时，顶层 content/reasoning 的拼接差异不影响 live 高度复用', () => {
+    const segments: ChatMessage['segments'] = [
+      { id: 's1', kind: 'reasoning', phase: 'plain', order: 1000, text: '想一想' },
+      { id: 's2', kind: 'text', phase: 'plain', order: 1002, text: '回答' },
+    ]
+    const live = assistant({ segments, content: '回答', reasoning: '想一想' })
+    // 后端落库时用 "\n\n" 拼多步文本 / 推理，与前端流式累加的字符串不同
+    const settled = assistant({ segments, content: '回答\n\n', reasoning: '想一想\n\n' })
+    expect(canReuseLiveRowHeight(live, settled)).toBe(true)
+    // 分段本身变了才算正文变了
+    const changed = assistant({
+      segments: [segments![0]!, { ...segments![1]!, text: '回答已补全' }],
+    })
+    expect(canReuseLiveRowHeight(live, changed)).toBe(false)
+  })
+
+  it('工具状态 completed（流式）与 success（落库）视为同一几何', () => {
+    const segments: ChatMessage['segments'] = [
+      { id: 's1', kind: 'tool', phase: 'tool_loop', order: 1003, tool_call_id: 'c1' },
+      { id: 's2', kind: 'text', phase: 'plain', order: 1007, text: '完成' },
+    ]
+    const live = assistant({
+      segments,
+      tool_calls: [{ id: 'c1', name: 'read_file', source: 'native', status: 'completed' }],
+    })
+    const settled = assistant({
+      segments,
+      tool_calls: [{ id: 'c1', name: 'read_file', source: 'native', status: 'success' }],
+    })
+    expect(canReuseLiveRowHeight(live, settled)).toBe(true)
+    const failed = assistant({
+      segments,
+      tool_calls: [{ id: 'c1', name: 'read_file', source: 'native', status: 'error' }],
+    })
+    expect(canReuseLiveRowHeight(live, failed)).toBe(false)
+  })
+
   it('同长度中间改写会换测量 key', () => {
     const prefix = 'x'.repeat(300)
     const suffix = 'y'.repeat(300)

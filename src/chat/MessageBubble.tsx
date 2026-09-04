@@ -66,6 +66,14 @@ interface MessageBubbleProps {
   reasoningStreaming?: boolean
   /** 这条消息整体是否在流式生成中（仅 streaming-assistant bubble 为 true） */
   messageStreaming?: boolean
+  /**
+   * MarkdownStreamingContext 的值（默认跟 messageStreaming）。它不再决定 Streamdown 的
+   * 模式 / key（整条消息终身 streaming 模式，见 ChatMarkdown），只管「出字中」的内容策略：
+   * mermaid 显示源码还是出图、重内容岛是否 eager、高亮缓存只读。live 行在 settle 冻结帧会把
+   * messageStreaming 置 false（停 shimmer / 入场动画）但把这个值留为 true，让上述变化只在
+   * 落库 twin 首挂时发生一次。
+   */
+  markdownStreaming?: boolean
   /** R8（多模型一问多答）：本条 user 消息这一问发给了哪些模型；多模型时渲染在气泡顶部。 */
   sentModels?: { providerId: string | null; model: string | null }[]
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
@@ -953,6 +961,7 @@ function MessageBubbleComponent({
   reasoningDurationMsBySegmentId,
   reasoningStreaming = false,
   messageStreaming = false,
+  markdownStreaming = messageStreaming,
   sentModels,
   onUpdateMessage,
   onRegenerateMessage,
@@ -1190,7 +1199,7 @@ function MessageBubbleComponent({
   }
 
   return (
-    <MarkdownStreamingContext.Provider value={messageStreaming}>
+    <MarkdownStreamingContext.Provider value={markdownStreaming}>
     <div
       {...hoverProps}
       className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}
