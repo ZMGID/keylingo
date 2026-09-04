@@ -531,6 +531,13 @@ impl OpenAiResponsesProvider<'_> {
                 body["store"] = Value::Bool(false);
                 body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
             }
+        } else if !is_xai {
+            // 开思考但模型没有深度旋钮（`resolve_thinking` → `(true, None)`）：
+            // 不编造 effort，但仍要 summary + 无状态 encrypted replay。副调用也走这条
+            // （`thinking_enabled: true` 且不设档，避免发 `effort:"none"`）。
+            body["reasoning"] = serde_json::json!({ "summary": "auto" });
+            body["store"] = Value::Bool(false);
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
         if is_xai {
             // **必须显式关掉服务端存储。** xAI 的 Responses 是有状态设计，`store` 默认 true，
@@ -2051,8 +2058,15 @@ mod tests {
             "body: {on}"
         );
         assert_eq!(on["tool_choice"], "auto");
-        // 开思考但无档位 ⇒ 不发 reasoning（effort 由 resolve_thinking 在上游决定，适配器不兜底）。
-        assert!(on.get("reasoning").is_none(), "body: {on}");
+        // 开思考但无档位 ⇒ 不编造 effort，但仍要 summary + 无状态 encrypted replay。
+        assert!(on["reasoning"].get("effort").is_none(), "body: {on}");
+        assert_eq!(on["reasoning"]["summary"], "auto", "body: {on}");
+        assert_eq!(on["store"], false, "body: {on}");
+        assert_eq!(
+            on["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "body: {on}"
+        );
         // 显式设 high ⇒ reasoning.effort=high。
         let mut req_high = base.clone();
         req_high.options.builtin_web_search = true;
@@ -2067,8 +2081,15 @@ mod tests {
         let xh = adapter.request_body(&req_x, false);
         assert_eq!(xh["reasoning"]["effort"], "xhigh", "body: {xh}");
         assert_eq!(xh["reasoning"]["summary"], "auto", "body: {xh}");
-        // 纯对话（开思考、无内置、无档）⇒ 不发 reasoning。
-        assert!(off.get("reasoning").is_none(), "body: {off}");
+        // 纯对话（开思考、无内置、无档）⇒ 同样要 summary / store / include，不编造 effort。
+        assert!(off["reasoning"].get("effort").is_none(), "body: {off}");
+        assert_eq!(off["reasoning"]["summary"], "auto", "body: {off}");
+        assert_eq!(off["store"], false, "body: {off}");
+        assert_eq!(
+            off["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "body: {off}"
+        );
         // UI Off → 显式 none（OpenAI / DeepSeek Responses 文档；省略会默认 high）。
         let mut req_off = base.clone();
         req_off.options.thinking_enabled = false;
@@ -2092,9 +2113,13 @@ mod tests {
             serde_json::json!(["reasoning.encrypted_content"]),
             "body: {high}"
         );
-        // 开思考但不发 reasoning 档时不该无故附带这两项（保持与既有纯对话请求字节兼容）。
-        assert!(off.get("store").is_none(), "body: {off}");
-        assert!(off.get("include").is_none(), "body: {off}");
+        // 开思考但无档时同样走无状态 encrypted replay（与有档路径一致，只是不编造 effort）。
+        assert_eq!(off["store"], false, "body: {off}");
+        assert_eq!(
+            off["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "body: {off}"
+        );
     }
 
     #[test]

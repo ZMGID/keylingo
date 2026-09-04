@@ -20,6 +20,7 @@ export function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
   const name = (payload.name || '').toLowerCase()
   const target = payload.target?.trim()
   if (name === 'exitplanmode') return '批准这份计划，开始执行？'
+  if (name === 'cursor/create_plan' || name === 'create_plan') return '批准这份计划？'
   if (name === 'enterplanmode') return '让 claude 先出方案，暂不改动代码？'
   if (name === 'request_permissions' || name === 'permissions') {
     const wantsNetwork = (payload.argumentsPreview || '').includes('Network access')
@@ -34,8 +35,17 @@ export function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
   return `允许${spec.verb} ${shown}？`
 }
 
-export function isPlanApproval(payload: ChatToolConfirmPayload): boolean {
+export function isClaudePlanApproval(payload: ChatToolConfirmPayload): boolean {
   return (payload.name || '').toLowerCase() === 'exitplanmode'
+}
+
+export function isCursorPlanApproval(payload: ChatToolConfirmPayload): boolean {
+  const name = (payload.name || '').toLowerCase()
+  return name === 'cursor/create_plan' || name === 'create_plan'
+}
+
+export function isPlanApproval(payload: ChatToolConfirmPayload): boolean {
+  return isClaudePlanApproval(payload) || isCursorPlanApproval(payload)
 }
 
 export function isEnterPlanApproval(payload: ChatToolConfirmPayload): boolean {

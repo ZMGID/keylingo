@@ -265,6 +265,13 @@ pub enum UnifiedAgentEvent {
         id: String,
         text: String,
     },
+    /// Pi `clear_queue` 在取消时退回的立刻引导 / follow-up 原文。
+    ///
+    /// 交互式 Esc 会把这些字写回编辑器；Kivio 同样写回输入框，而不是留在 Pi 队列里
+    /// 等下一轮 prompt 被悄悄注入。
+    QueuedTextsRestored {
+        texts: Vec<String>,
+    },
     /// CLI 在**自己内部**完成了一次上下文压缩（claude 的
     /// `{"type":"system","subtype":"compact_boundary"}`）。
     ///

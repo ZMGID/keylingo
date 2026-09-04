@@ -1996,6 +1996,12 @@ fn cursor_cancelled_result() -> Value {
     json!({ "outcome": { "outcome": "cancelled" } })
 }
 
+/// 未知的带 `id` 请求：回 cancelled 结果而不是 `-32601`。
+/// 部分 CLI 把 Method not found 当协议失败，这一轮会挂死。
+fn unknown_blocking_rpc_result() -> Value {
+    cursor_cancelled_result()
+}
+
 fn cursor_handshake_result(method: &str, params: &Value) -> Value {
     if cursor_extension_is_blocking(method) {
         cursor_cancelled_result()
@@ -2148,7 +2154,7 @@ async fn handle_cursor_extension(
         .map(str::to_string)
         .unwrap_or_else(|| format!("cursor-{request_id}"));
     let tool_name = if method == "cursor/create_plan" {
-        "ExitPlanMode"
+        "cursor/create_plan"
     } else {
         "cursor/ask_question"
     };
@@ -2249,7 +2255,7 @@ async fn handle_agent_to_client_request(
         return Ok(false);
     }
     if let Some(id) = value.get("id") {
-        write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await?;
+        write_rpc_result(stdin, id, unknown_blocking_rpc_result()).await?;
         return Ok(true);
     }
     Ok(true)
@@ -2412,6 +2418,10 @@ mod tests {
                 }
             ),
             json!({ "outcome": { "outcome": "accepted" } })
+        );
+        assert_eq!(
+            unknown_blocking_rpc_result(),
+            json!({ "outcome": { "outcome": "cancelled" } })
         );
     }
 
@@ -3507,6 +3517,7 @@ mod tests {
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
             UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
             UnifiedAgentEvent::UserFollowUp { .. } => "UserFollowUp",
+            UnifiedAgentEvent::QueuedTextsRestored { .. } => "QueuedTextsRestored",
             UnifiedAgentEvent::StatusNote { .. } => "StatusNote",
             UnifiedAgentEvent::BackgroundTask { .. } => "BackgroundTask",
             UnifiedAgentEvent::TodoWrite { .. } => "TodoWrite",

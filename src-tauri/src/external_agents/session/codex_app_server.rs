@@ -1631,7 +1631,12 @@ async fn answer_codex_server_request(
     if let Some(result) = approval_response(method, params) {
         return write_rpc_result(stdin, id, result).await;
     }
-    write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await
+    write_rpc_result(stdin, id, unknown_server_request_result()).await
+}
+
+/// 未知的带 `id` 请求：回 decline 结果而不是 `-32601`，避免这一轮挂死。
+fn unknown_server_request_result() -> Value {
+    json!({ "decision": "decline" })
 }
 
 async fn answer_codex_tool_approval(
@@ -1857,7 +1862,7 @@ async fn answer_handshake_request(
     if let Some(result) = approval_response(method, params) {
         write_rpc_result(stdin, id, result).await
     } else {
-        write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await
+        write_rpc_result(stdin, id, unknown_server_request_result()).await
     }
 }
 
@@ -3104,6 +3109,7 @@ mod tests {
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
             UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
             UnifiedAgentEvent::UserFollowUp { .. } => "UserFollowUp",
+            UnifiedAgentEvent::QueuedTextsRestored { .. } => "QueuedTextsRestored",
             UnifiedAgentEvent::StatusNote { .. } => "StatusNote",
             UnifiedAgentEvent::BackgroundTask { .. } => "BackgroundTask",
             UnifiedAgentEvent::TodoWrite { .. } => "TodoWrite",
@@ -3552,6 +3558,10 @@ mod tests {
         assert_eq!(
             approval_deny_response("openai/elicitation", false),
             Some(json!({ "action": "decline", "content": null }))
+        );
+        assert_eq!(
+            unknown_server_request_result(),
+            json!({ "decision": "decline" })
         );
     }
 

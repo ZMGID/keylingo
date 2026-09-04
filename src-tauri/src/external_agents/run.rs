@@ -2988,6 +2988,13 @@ fn apply_unified_event(
             tool_calls.push(record.clone());
             emit_chat_tool_record(app, run_id, &record);
         }
+        UnifiedAgentEvent::QueuedTextsRestored { texts } => {
+            crate::chat::protocol::emit_run_event(
+                app,
+                run_id,
+                crate::chat::protocol::ChatRunEvent::QueuedTextsRestored { texts },
+            );
+        }
         // 上游重试等瞬态状态 → 流状态行（StreamStatusLine），不进正文。
         // 前端在下一条正文/思考增量到达时自行清除（重试成功没有显式信号，流恢复即成功）。
         UnifiedAgentEvent::StatusNote { text } => {

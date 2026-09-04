@@ -42,6 +42,7 @@ import {
 } from '../streamingStore'
 import type { MessageListProps } from '../MessageList'
 import type { AgentPlanState, AgentTodoState, Conversation, PendingAttachment, ThinkingLevel } from '../types'
+import { insertTextIntoComposer } from '../composerInsert'
 import { usePopoutComposer } from './usePopoutComposer'
 import type {
   ChatSessionConsentPayload,
@@ -302,6 +303,12 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
   useTauriEvent(api.onChatHook, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
     setHookWarning(payload)
+  }, [])
+
+  useTauriEvent(api.onChatQueuedTextsRestored, (payload) => {
+    if (payload.conversationId !== conversationIdRef.current) return
+    const text = payload.texts.map((item) => item.trim()).filter(Boolean).join('\n\n')
+    if (text) insertTextIntoComposer(text)
   }, [])
 
   useTauriEvent(api.onChatStatusNote, (payload) => {

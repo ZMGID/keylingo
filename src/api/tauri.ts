@@ -2157,6 +2157,20 @@ export const api = {
       })
     })
   },
+  /** Pi `clear_queue` 退回的立刻引导 / follow-up 原文，写回输入框。快照回放忽略。 */
+  onChatQueuedTextsRestored: (
+    listener: (payload: { conversationId: string; texts: string[] }) => void,
+  ) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return onChatProtocol((event, delivery) => {
+      if (event.scope !== 'run' || event.type !== 'queued_texts_restored') return
+      if (delivery.source === 'snapshot') return
+      listener({
+        conversationId: event.conversationId,
+        texts: event.texts,
+      })
+    })
+  },
   /** 流状态行的瞬态一行字（上游重试等，status_note_updated）。note=null 为显式清除。 */
   onChatStatusNote: (
     listener: (payload: { conversationId: string; runId: string; note: string | null }) => void,

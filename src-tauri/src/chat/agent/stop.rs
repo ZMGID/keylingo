@@ -125,7 +125,7 @@ pub fn assistant_api_message_for_tool_calls(
     {
         return message.clone();
     }
-    serde_json::json!({
+    let mut rebuilt = serde_json::json!({
         "role": "assistant",
         "content": Value::Null,
         "tool_calls": tool_calls.iter().map(|call| {
@@ -138,7 +138,13 @@ pub fn assistant_api_message_for_tool_calls(
                 }
             })
         }).collect::<Vec<_>>(),
-    })
+    });
+    // DSML 重建会丢掉原生 `tool_calls` 之外的回放键。Responses 下一轮靠
+    // `reasoning_items` 里的 encrypted_content 接上思考链，必须原样带过去。
+    if let Some(items) = message.get("reasoning_items") {
+        rebuilt["reasoning_items"] = items.clone();
+    }
+    rebuilt
 }
 
 pub fn sanitize_assistant_text_response(content: &str) -> String {
@@ -374,6 +380,33 @@ mod tests {
                 .get("reasoning_content")
                 .and_then(|value| value.as_str()),
             Some("thinking")
+        );
+    }
+
+    #[test]
+    fn dsml_rebuild_keeps_reasoning_items() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": "<|DSML|tool_calls></|DSML|tool_calls>",
+            "reasoning_items": [{
+                "model": "gpt-5.6",
+                "item": { "id": "rs_1", "encrypted_content": "gAAA" }
+            }]
+        });
+        let calls = vec![PendingToolCall {
+            id: "call_1".to_string(),
+            function_name: "skill".to_string(),
+            arguments: serde_json::json!({ "name": "pdf" }),
+            arguments_raw: "{\"name\":\"pdf\"}".to_string(),
+            arguments_parse_error: None,
+            signature: None,
+        }];
+        let rebuilt = assistant_api_message_for_tool_calls(&message, &calls);
+        assert_eq!(rebuilt["tool_calls"][0]["id"], "call_1");
+        assert_eq!(rebuilt["reasoning_items"][0]["item"]["id"], "rs_1");
+        assert_eq!(
+            rebuilt["reasoning_items"][0]["item"]["encrypted_content"],
+            "gAAA"
         );
     }
 

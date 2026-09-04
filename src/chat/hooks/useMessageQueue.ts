@@ -115,6 +115,25 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     callbacksRef.current.onRestoreToComposer(message)
   }, [patch])
 
+  /** Pi `clear_queue` 退回的原文：出队（含已提交）并写回输入框。 */
+  const restoreClearedQueue = useCallback((conversationId: string, texts: string[]) => {
+    const trimmed = texts.map((text) => text.trim()).filter(Boolean)
+    if (trimmed.length === 0) return
+    const pending = new Set(trimmed)
+    patch(conversationId, (items) => items.filter((item) => {
+      const content = item.content.trim()
+      if (!pending.has(content)) return true
+      pending.delete(content)
+      return false
+    }))
+    callbacksRef.current.onRestoreToComposer({
+      id: nextQueuedId(),
+      content: trimmed.join('\n\n'),
+      attachments: [],
+      steering: false,
+    })
+  }, [patch])
+
   const clearConversation = useCallback((conversationId: string) => {
     patch(conversationId, () => [])
   }, [patch])
@@ -255,6 +274,7 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     enqueue,
     remove,
     restoreToComposer,
+    restoreClearedQueue,
     clearConversation,
     drain,
     steer,

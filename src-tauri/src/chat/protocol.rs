@@ -638,6 +638,11 @@ pub enum ChatRunEvent {
     StatusNoteUpdated {
         note: Option<String>,
     },
+    /// Pi `clear_queue` 在取消时退回的立刻引导 / follow-up 原文，前端写回输入框。
+    /// 只在直播路径消费；快照回放忽略（避免打开旧对话时污染输入框）。
+    QueuedTextsRestored {
+        texts: Vec<String>,
+    },
     RunCompleted {
         full: String,
         conversation_revision: u64,
@@ -679,6 +684,7 @@ impl ChatRunEvent {
                 | Self::TodoUpdated { .. }
                 | Self::PlanUpdated { .. }
                 | Self::StatusNoteUpdated { .. }
+                | Self::QueuedTextsRestored { .. }
                 | Self::HookFailed { .. }
         )
     }
@@ -2203,6 +2209,9 @@ mod tests {
             }),
             serde_json::json!({"type": "status_note_updated", "note": "retry 2/10"}),
             serde_json::json!({"type": "status_note_updated", "note": null}),
+            serde_json::json!({
+                "type": "queued_texts_restored", "texts": ["Change direction"]
+            }),
             serde_json::json!({
                 "type": "run_completed", "full": "answer", "conversationRevision": 2
             }),

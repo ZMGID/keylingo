@@ -381,11 +381,14 @@ impl GeminiProvider<'_> {
         // 思考等级 → thinkingConfig，原样下发（档位由模型库 reasoningEfforts 门控）。
         // 版本分叉:Gemini 3.x 用 `thinkingLevel`(字符串档位),2.5 系只认 `thinkingBudget`(数值),
         // 两者互斥、传错会 400。故 thinkingLevel 只对 3.x 下发;其余(2.5/未知)回退到仅 `includeThoughts`
-        // (开思维输出、不强加档位)——保持改动前对 2.5 的非回归行为。includeThoughts 两条路都带,拿摘要。
-        if let Some(level) = request.options.thinking_level.as_deref() {
+        // (开思维输出、不强加档位)。开思考但无档（空 reasoningEfforts / 副调用）仍要
+        // includeThoughts，否则思维摘要整段丢掉。
+        if request.options.thinking_enabled {
             let mut thinking = serde_json::json!({ "includeThoughts": true });
-            if gemini_supports_thinking_level(&request.model) {
-                thinking["thinkingLevel"] = Value::String(level.to_string());
+            if let Some(level) = request.options.thinking_level.as_deref() {
+                if gemini_supports_thinking_level(&request.model) {
+                    thinking["thinkingLevel"] = Value::String(level.to_string());
+                }
             }
             body["generationConfig"]["thinkingConfig"] = thinking;
         }
@@ -1295,10 +1298,16 @@ mod tests {
             options: GenerateOptions::default(),
             metadata: Default::default(),
         };
-        // 无档位 ⇒ 不发 thinkingConfig。
+        // 无档位但仍开思考 ⇒ 只发 includeThoughts，不编造 thinkingLevel。
         let none = body_for(&base, false);
+        assert_eq!(
+            none["generationConfig"]["thinkingConfig"]["includeThoughts"], true,
+            "body: {none}"
+        );
         assert!(
-            none["generationConfig"].get("thinkingConfig").is_none(),
+            none["generationConfig"]["thinkingConfig"]
+                .get("thinkingLevel")
+                .is_none(),
             "body: {none}"
         );
         // 设 medium ⇒ thinkingConfig.thinkingLevel=medium。

@@ -10,8 +10,9 @@ import { usesNativeTitlebar } from '../platform'
 import { IconButton } from '../../components/Button'
 import { i18n, LangContext, type Lang } from '../../settings/i18n'
 import {
+  isClaudePlanApproval,
+  isCursorPlanApproval,
   isEnterPlanApproval,
-  isPlanApproval,
   PLAN_APPROVAL_ACTIONS,
   toolApprovalTitle,
 } from '../toolApproval'
@@ -73,7 +74,7 @@ function PopoutPendingSlot({
             subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
             detail={pendingToolConfirm.argumentsPreview}
             error={toolConfirmError}
-            actions={isPlanApproval(pendingToolConfirm)
+            actions={isClaudePlanApproval(pendingToolConfirm)
               ? [
                 { label: '拒绝 / 让它改', disabled: toolConfirmSubmitting, onSelect: () => { void resolveToolConfirm(false) } },
                 ...PLAN_APPROVAL_ACTIONS.map((action, index) => ({
@@ -83,6 +84,11 @@ function PopoutPendingSlot({
                   onSelect: () => { void resolveToolConfirm(true, false, action.mode) },
                 })),
               ]
+              : isCursorPlanApproval(pendingToolConfirm)
+                ? [
+                  { label: '拒绝 / 让它改', disabled: toolConfirmSubmitting, onSelect: () => { void resolveToolConfirm(false) } },
+                  { label: '批准', primary: true, disabled: toolConfirmSubmitting, onSelect: () => { void resolveToolConfirm(true) } },
+                ]
               : isEnterPlanApproval(pendingToolConfirm)
                 ? [
                   { label: '不用，直接做', disabled: toolConfirmSubmitting, onSelect: () => { void resolveToolConfirm(false) } },

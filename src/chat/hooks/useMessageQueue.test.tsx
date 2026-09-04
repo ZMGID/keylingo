@@ -342,6 +342,22 @@ describe('useMessageQueue', () => {
     expect(result.current.queued['conv-1'].map((item) => item.content)).toEqual(['已引导'])
   })
 
+  it('clear_queue 退回的原文出队并写回输入框，已提交的也撤', async () => {
+    const { result, onRestoreToComposer } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', 'Change direction', [])!.id })
+    await act(async () => { await result.current.steer('conv-1', id) })
+    act(() => { result.current.enqueue('conv-1', '留下', []) })
+
+    act(() => {
+      result.current.restoreClearedQueue('conv-1', ['Change direction', 'Summarize'])
+    })
+    expect(onRestoreToComposer).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'Change direction\n\nSummarize' }),
+    )
+    expect(result.current.queued['conv-1'].map((item) => item.content)).toEqual(['留下'])
+  })
+
   it('队列按会话隔离', async () => {
     const { result, onSendMessage } = setup()
     act(() => {

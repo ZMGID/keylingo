@@ -1219,6 +1219,61 @@
         },
         {
           "additionalProperties": false,
+          "description": "Pi `clear_queue` 在取消时退回的立刻引导 / follow-up 原文，前端写回输入框。\n只在直播路径消费；快照回放忽略（避免打开旧对话时污染输入框）。",
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "texts": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "queued_texts_restored",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "texts",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "properties": {
             "baseRevision": {
               "format": "uint64",
