@@ -22,3 +22,12 @@ export function copyToClipboard(text: string): Promise<boolean> {
     .then(() => true)
     .catch(() => tryLegacyCopy(text))
 }
+
+export async function readClipboardText(): Promise<string> {
+  try {
+    if (navigator.clipboard?.readText) return await navigator.clipboard.readText()
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
