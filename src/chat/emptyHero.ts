@@ -163,11 +163,11 @@ export function emptyHeroJab(
   return list[Math.floor(random() * list.length)]
 }
 
-/** 闲置小动作时嘟囔一句（变云 / 变方 / 竖起来 / 蹦一下），说完收回。不是每次都说：
- *  蹦是最常见的小动作（每半分钟左右一次），说得少些；变形态本身就稀罕，多半会念一句。 */
+/** 闲置小动作时嘟囔一句（变云 / 变方 / 竖起来 / 蹦一下），说完收回。多数时候不说：
+ *  蹦是最常见的小动作，几乎不配词；变形态本身就稀罕，也只有一半不到会念一句。 */
 export const EMPTY_HERO_MUTTER_MS = 3200
-export const EMPTY_HERO_MUTTER_CHANCE = 0.75
-export const EMPTY_HERO_MUTTER_HOP_CHANCE = 0.3
+export const EMPTY_HERO_MUTTER_CHANCE = 0.45
+export const EMPTY_HERO_MUTTER_HOP_CHANCE = 0.15
 
 const MUTTERS: Record<Lang, Partial<Record<BlobAntic, readonly string[]>>> = {
   zh: {

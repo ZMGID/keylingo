@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BLOB_DONE_MS, StreamStatusLine } from './StreamStatusLine'
-import { STATUS_QUIPS } from './blobQuips'
+import { STATUS_QUIPS, quipPlan } from './blobQuips'
 import { patchSnapshot, reset, setCoarse } from './streamingStore'
 import type { ToolCallRecord } from './types'
 
@@ -48,7 +48,7 @@ describe('StreamStatusLine', () => {
     expect(screen.getByTestId('blob').dataset.mood).toBe('wait')
     expect(screen.getByText(/3s · 1 running/)).toBeTruthy()
     act(() => {
-      vi.advanceTimersByTime(1000)
+      vi.advanceTimersByTime(quipPlan('wait')!.first)
     })
     expect(screen.getByText(new RegExp(STATUS_QUIPS.zh.wait[0]))).toBeTruthy()
   })
@@ -83,6 +83,19 @@ describe('StreamStatusLine', () => {
       vi.advanceTimersByTime(BLOB_DONE_MS + 100)
     })
     expect(screen.getByTestId('blob').dataset.mood).toBe('idle')
+    expect(screen.queryByText(STATUS_QUIPS.en.done[0])).toBeNull()
+  })
+
+  it('收工没掷中就安静回闲置，不蹦不说', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
+    patchSnapshot({ streaming: true, startedAt: Date.now(), content: '答' })
+    const { rerender } = render(<StreamStatusLine active lang="en" />)
+    reset()
+    rerender(<StreamStatusLine active={false} lang="en" />)
+    expect(screen.getByTestId('blob').dataset.mood).toBe('idle')
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
     expect(screen.queryByText(STATUS_QUIPS.en.done[0])).toBeNull()
   })
 

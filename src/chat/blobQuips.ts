@@ -31,31 +31,33 @@ export const STATUS_QUIPS: Record<Lang, Record<QuipMood, readonly string[]>> = {
 }
 
 /**
- * 何时开口。`first` = 进入该心情多久后第一句；`show` = 一句挂多久（null = 常驻）；
- * `gap` = 收回（或常驻换句）前隔多久。
+ * 何时开口。`first` = 进入该心情多久后到第一个「可能开口」的点；每个点按 `chance` 掷一次，
+ * 没中就闭嘴等下一个点；`show` = 说了的话挂多久（null = 常驻）；`gap` = 两个点之间隔多久。
+ * 整体调得偏安静：一轮几十秒的生成里大概率只冒一句，甚至一句都没有——每次都说就不是「偶尔」了。
  */
 export interface QuipPlan {
   first: number
   show: number | null
   gap: [number, number]
+  chance: number
 }
 
 export function quipPlan(mood: BlobMood): QuipPlan | null {
   switch (mood) {
     case 'think':
-      return { first: 6000, show: 4500, gap: [7000, 14000] }
+      return { first: 12000, show: 4000, gap: [18000, 40000], chance: 0.4 }
     case 'search':
-      return { first: 3500, show: 3500, gap: [6000, 12000] }
+      return { first: 6000, show: 3500, gap: [12000, 30000], chance: 0.35 }
     case 'work':
-      return { first: 5000, show: 4000, gap: [7000, 14000] }
+      return { first: 10000, show: 3500, gap: [18000, 40000], chance: 0.35 }
     case 'speak':
-      return { first: 9000, show: 3500, gap: [12000, 20000] }
+      return { first: 15000, show: 3000, gap: [25000, 50000], chance: 0.3 }
     case 'error':
-      return { first: 500, show: null, gap: [0, 0] }
+      return { first: 500, show: null, gap: [0, 0], chance: 0.5 }
     case 'done':
-      return { first: 0, show: null, gap: [0, 0] }
+      return { first: 0, show: null, gap: [0, 0], chance: 0.4 }
     case 'wait':
-      return { first: 900, show: null, gap: [9000, 9000] }
+      return { first: 1200, show: null, gap: [15000, 15000], chance: 0.45 }
     default:
       return null
   }
@@ -91,16 +93,20 @@ export function useStatusQuip(mood: BlobMood, lang: Lang, enabled = true): strin
     if (!plan || !enabled) return
     let id = 0
     const say = () => {
-      const line = pickQuip(lang, mood, lastRef.current)
-      lastRef.current = line
+      const speak = Math.random() < plan.chance
+      const line = speak ? pickQuip(lang, mood, lastRef.current) : null
+      if (line) lastRef.current = line
       setQuip(line)
-      if (plan.show == null) {
+      const next = () => {
         if (plan.gap[1] > 0) id = window.setTimeout(say, within(plan.gap, Math.random))
+      }
+      if (plan.show == null || !line) {
+        next()
         return
       }
       id = window.setTimeout(() => {
         setQuip(null)
-        id = window.setTimeout(say, within(plan.gap, Math.random))
+        next()
       }, plan.show)
     }
     id = window.setTimeout(say, plan.first)

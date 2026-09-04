@@ -115,9 +115,10 @@ describe('useEmptyHeroMutter', () => {
     expect(result.current.mutter).toBeNull()
   })
 
-  it('不是每次都说：蹦比变形态更少开口', () => {
-    expect(emptyHeroMutter('zh', 'egg', () => 0.5)).not.toBeNull()
-    expect(emptyHeroMutter('zh', 'hop', () => 0.5)).toBeNull()
+  it('多数时候不说：变形态不到一半会念，蹦几乎不配词', () => {
+    expect(emptyHeroMutter('zh', 'egg', () => 0.3)).not.toBeNull()
+    expect(emptyHeroMutter('zh', 'egg', () => 0.5)).toBeNull()
+    expect(emptyHeroMutter('zh', 'hop', () => 0.3)).toBeNull()
     expect(emptyHeroMutter('en', 'hop', () => 0.1)).toBe('Stretching.')
     expect(emptyHeroMutter('en', 'squircle', () => 0.9)).toBeNull()
   })

@@ -3,16 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { STATUS_QUIPS, pickQuip, quipPlan, useStatusQuip } from './blobQuips'
 
 describe('blobQuips', () => {
-  it('闲置不说话；边沿心情进去就说且常驻，阶段心情等一会再说、说完收回', () => {
+  it('闲置不说话；边沿心情进去就可能说且常驻，阶段心情等一会再说、说完收回；哪种都不是必说', () => {
     expect(quipPlan('idle')).toBeNull()
-    expect(quipPlan('done')).toEqual({ first: 0, show: null, gap: [0, 0] })
+    expect(quipPlan('done')).toEqual({ first: 0, show: null, gap: [0, 0], chance: 0.4 })
     expect(quipPlan('error')?.show).toBeNull()
     expect(quipPlan('wait')?.show).toBeNull()
     for (const mood of ['think', 'search', 'work', 'speak'] as const) {
       const plan = quipPlan(mood)!
-      expect(plan.first).toBeGreaterThan(2000)
+      expect(plan.first).toBeGreaterThanOrEqual(6000)
       expect(plan.show).toBeGreaterThan(0)
-      expect(plan.gap[0]).toBeGreaterThan(plan.show!)
+      expect(plan.gap[0]).toBeGreaterThan(plan.show! * 3)
+    }
+    for (const mood of ['think', 'search', 'work', 'speak', 'error', 'done', 'wait'] as const) {
+      expect(quipPlan(mood)!.chance).toBeLessThanOrEqual(0.5)
     }
   })
 
@@ -40,11 +43,12 @@ describe('useStatusQuip', () => {
     vi.useRealTimers()
   })
 
-  it('思考：先憋 6s 再开口，挂 4.5s 收回，隔一阵再来一句不重样', () => {
+  it('思考：先憋够 first 再开口，挂 show 收回，隔 gap 再来一句不重样', () => {
+    const plan = quipPlan('think')!
     const { result } = renderHook(() => useStatusQuip('think', 'zh'))
     expect(result.current).toBeNull()
     act(() => {
-      vi.advanceTimersByTime(5999)
+      vi.advanceTimersByTime(plan.first - 1)
     })
     expect(result.current).toBeNull()
     act(() => {
@@ -52,13 +56,28 @@ describe('useStatusQuip', () => {
     })
     expect(result.current).toBe(STATUS_QUIPS.zh.think[0])
     act(() => {
-      vi.advanceTimersByTime(4500)
+      vi.advanceTimersByTime(plan.show!)
     })
     expect(result.current).toBeNull()
     act(() => {
-      vi.advanceTimersByTime(7000)
+      vi.advanceTimersByTime(plan.gap[0])
     })
     expect(result.current).toBe(STATUS_QUIPS.zh.think[1])
+  })
+
+  it('没掷中就闭嘴，等下一个点再掷', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.99)
+    const plan = quipPlan('search')!
+    const { result } = renderHook(() => useStatusQuip('search', 'zh'))
+    act(() => {
+      vi.advanceTimersByTime(plan.first + plan.gap[1] * 3)
+    })
+    expect(result.current).toBeNull()
+    const { result: done } = renderHook(() => useStatusQuip('done', 'zh'))
+    act(() => {
+      vi.advanceTimersByTime(10)
+    })
+    expect(done.current).toBeNull()
   })
 
   it('收工立刻说、常驻；换心情马上闭嘴重排', () => {

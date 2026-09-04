@@ -301,11 +301,12 @@ function nextIdleBias(
   rand: (a: number, b: number) => number,
   sign: () => number,
 ): IdleBias & { hold: [number, number]; hop: boolean; antic: BodyShape | null } {
+  // 档位：38% 原地不动、28% 歪一点、12% 上浮、8% 下沉、8% 蹦一下、6% 变形态。
   const r = rand(0, 1)
-  if (r < 0.34) {
+  if (r < 0.38) {
     return { spin: 0, tx: 0, ty: 0, squash: 1, hold: [4000, 14000], hop: false, antic: null }
   }
-  if (r < 0.62) {
+  if (r < 0.66) {
     const d = sign()
     return {
       spin: d * rand(6, 14),
@@ -317,13 +318,13 @@ function nextIdleBias(
       antic: null,
     }
   }
-  if (r < 0.74) {
+  if (r < 0.78) {
     return { spin: rand(-3, 3), tx: 0, ty: -rand(1.5, 4), squash: 1.02, hold: [2800, 9000], hop: false, antic: null }
   }
-  if (r < 0.82) {
+  if (r < 0.86) {
     return { spin: 0, tx: 0, ty: rand(1.5, 4), squash: 0.984, hold: [3500, 11000], hop: false, antic: null }
   }
-  if (r < 0.92) {
+  if (r < 0.94) {
     const d = sign()
     return {
       spin: d * rand(4, 10),
@@ -335,7 +336,7 @@ function nextIdleBias(
       antic: null,
     }
   }
-  // 变个形态玩一会，再慢慢变回圆。
+  // 变个形态玩一会，再慢慢变回圆（每次挑档 6%，档位 3–10 秒一换 ⇒ 大约两分钟一回）。
   const shape = IDLE_ANTIC_SHAPES[Math.min(IDLE_ANTIC_SHAPES.length - 1, Math.floor(rand(0, IDLE_ANTIC_SHAPES.length)))]
   return {
     spin: shape === 'cloud' ? rand(-4, 4) : sign() * rand(3, 8),

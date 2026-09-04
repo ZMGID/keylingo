@@ -23,8 +23,10 @@ function toolName(tool: { tool_name?: string; toolName?: string; name?: string }
   return tool.tool_name || tool.toolName || tool.name || ''
 }
 
-/** 刚收工后小得意的窗口：happy 脸 + 蹦一下 + 「搞定」。 */
+/** 刚收工后小得意的窗口：happy 脸 + 蹦一下（+ 可能一句「搞定」）。 */
 export const BLOB_DONE_MS = 2600
+/** 不是每次收工都得意——大多数时候安静回闲置。 */
+export const BLOB_DONE_CHANCE = 0.45
 
 function moodFromRun(active: boolean, doneUntil: number, now: number): BlobMood {
   const snapshot = getSnapshot()
@@ -95,10 +97,11 @@ export const StreamStatusLine = memo(function StreamStatusLine({ active, lang = 
   const prevActiveRef = useRef(active)
   const [mood, setMood] = useState<BlobMood>(() => moodFromRun(active, 0, Date.now()))
   useEffect(() => {
-    // 生成 true→false 且没翻车、没被停：进入「搞定」窗口。
+    // 生成 true→false 且没翻车、没被停：有概率进入「搞定」窗口。
     if (prevActiveRef.current && !active) {
       const coarse = getCoarse()
-      doneUntilRef.current = coarse.streamError || coarse.cancelling ? 0 : Date.now() + BLOB_DONE_MS
+      const celebrate = !coarse.streamError && !coarse.cancelling && Math.random() < BLOB_DONE_CHANCE
+      doneUntilRef.current = celebrate ? Date.now() + BLOB_DONE_MS : 0
     }
     prevActiveRef.current = active
     const update = () => {
