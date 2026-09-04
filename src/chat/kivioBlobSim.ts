@@ -88,7 +88,10 @@ const FACE_HOLD: Record<BlobMood, [number, number]> = {
   wait: [2600, 4800],
 }
 
-/** 身体形态轮播：大多数时候是圆，状态借一个形态来说话。 */
+/**
+ * 身体形态轮播：状态借一个形态来说话（思考=云、说话=气泡……）。但不是每轮都借——进入心情时
+ * 先按 BODY_CHANCE 掷一次，没中这一趟就老老实实当圆；每次都变云、变气泡就成了固定图标，不像小动作。
+ */
 const BODY_PLAY: Record<BlobMood, BodyShape[]> = {
   idle: ['circle'],
   think: ['cloud', 'cloud', 'circle', 'cloud'],
@@ -98,6 +101,16 @@ const BODY_PLAY: Record<BlobMood, BodyShape[]> = {
   error: ['puddle'],
   done: ['circle'],
   wait: ['circle', 'egg'],
+}
+const BODY_CHANCE: Record<BlobMood, number> = {
+  idle: 1,
+  think: 0.35,
+  search: 0.4,
+  work: 0.4,
+  speak: 0.25,
+  error: 1,
+  done: 1,
+  wait: 0.5,
 }
 const BODY_HOLD: Record<BlobMood, [number, number]> = {
   idle: [1e9, 1e9],
@@ -506,6 +519,8 @@ export class KivioBlobSim {
   private body = new PolyMorph('circle', [bodyPoints('circle')])
   private faceIdx = 0
   private bodyIdx = 0
+  /** 这一趟心情用的身体轮播：掷中才是 BODY_PLAY，否则只有圆。 */
+  private bodyList: BodyShape[] = ['circle']
   private t0 = 0
   private last = 0
   private faceUntil = 0
@@ -547,12 +562,12 @@ export class KivioBlobSim {
     const changed = mood !== this.mood || !this.inited
     this.mood = mood
     const faces = FACE_PLAY[mood]
-    const bodies = BODY_PLAY[mood]
     this.faceIdx = 0
     this.bodyIdx = 0
     if (changed) {
+      this.bodyList = this.random() < BODY_CHANCE[mood] ? BODY_PLAY[mood] : ['circle']
       this.face.retarget(faces[0], facePoints(faces[0]))
-      this.body.retarget(bodies[0], [bodyPoints(bodies[0])])
+      this.body.retarget(this.bodyList[0], [bodyPoints(this.bodyList[0])])
     }
     this.faceUntil = now + (mood === 'idle' ? this.span(...FACE_HOLD[mood]) : this.rand(...FACE_HOLD[mood]))
     this.bodyUntil = now + this.rand(...BODY_HOLD[mood])
@@ -699,8 +714,7 @@ export class KivioBlobSim {
       this.faceUntil = now + (this.mood === 'idle' ? this.span(...FACE_HOLD[this.mood]) : this.rand(...FACE_HOLD[this.mood]))
     }
     if (now >= this.bodyUntil) {
-      const list = BODY_PLAY[this.mood]
-      this.bodyIdx = (this.bodyIdx + 1) % list.length
+      this.bodyIdx = (this.bodyIdx + 1) % this.bodyList.length
       this.bodyUntil = now + this.rand(...BODY_HOLD[this.mood])
     }
     if (this.pokeShape && now >= this.pokeShapeUntil) this.pokeShape = null
@@ -847,8 +861,7 @@ export class KivioBlobSim {
     if (this.pokeShape) return this.pokeShape
     if (this.mood === 'error') return now < this.ctx.shakeUntil ? 'burst' : 'puddle'
     if (this.mood === 'idle') return this.ctx.antic ?? 'circle'
-    const list = BODY_PLAY[this.mood]
-    return list[this.bodyIdx % list.length]
+    return this.bodyList[this.bodyIdx % this.bodyList.length]
   }
 
   private rand(a: number, b: number) {

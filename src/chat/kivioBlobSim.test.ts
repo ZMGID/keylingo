@@ -196,21 +196,35 @@ describe('kivioBlobSim', () => {
     }
   })
 
-  it('思考变云、干活变方、说话带尾巴的气泡、出错摊成一滩', () => {
-    const shapeAfter = (mood: 'think' | 'work' | 'speak' | 'error') => {
-      const sim = new KivioBlobSim({ random: () => 0.5 })
+  it('掷中时：思考变云、干活变方、说话带尾巴的气泡；出错必摊成一滩', () => {
+    const shapeAfter = (mood: 'think' | 'work' | 'speak' | 'error', random: number) => {
+      const sim = new KivioBlobSim({ random: () => random })
       sim.setMood(mood, 0)
       for (let t = 0; t <= 1600; t += 16) sim.sample(t)
       return sim.debug().body
     }
-    expect(shapeAfter('think')).toBe('cloud')
-    expect(shapeAfter('work')).toBe('squircle')
-    expect(shapeAfter('speak')).toBe('bubble')
-    expect(shapeAfter('error')).toBe('puddle')
+    expect(shapeAfter('think', 0.1)).toBe('cloud')
+    expect(shapeAfter('work', 0.1)).toBe('squircle')
+    expect(shapeAfter('speak', 0.1)).toBe('bubble')
+    expect(shapeAfter('error', 0.1)).toBe('puddle')
+    expect(shapeAfter('error', 0.9)).toBe('puddle')
+  })
+
+  it('没掷中：生成中大多数时候就是个圆，不变云也不变气泡', () => {
+    for (const mood of ['think', 'speak', 'work', 'search'] as const) {
+      const sim = new KivioBlobSim({ random: () => 0.9 })
+      sim.setMood(mood, 0)
+      const seen = new Set<string>()
+      for (let t = 0; t <= 20000; t += 50) {
+        sim.sample(t)
+        seen.add(sim.debug().body)
+      }
+      expect([...seen]).toEqual(['circle'])
+    }
   })
 
   it('身体变形是渐进的：切心情后一帧不会直接跳成目标形状', () => {
-    const sim = new KivioBlobSim({ random: () => 0.5 })
+    const sim = new KivioBlobSim({ random: () => 0.1 })
     sim.setMood('idle', 0)
     sim.sample(0)
     const circle = sim.sample(16).bodyD
