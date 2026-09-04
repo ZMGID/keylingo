@@ -77,8 +77,6 @@ html.windows body {
   --theme-surface-titlebar: #eae9e7;
   --theme-surface-border: #e2e1df;
   --theme-surface-border-strong: #d2d1cf;
-  /* 单列阅读宽（= Tailwind max-w-4xl）。并排多答按「列数 × 此宽」封顶，不把整组塞进一列。 */
-  --chat-message-rail-max: 56rem;
 }
 
 /* ===== 全局按钮/组件语义 token（kv-btn / kv-icon-btn 依赖）=====
@@ -710,34 +708,6 @@ html.windows body {
 
 .chat-message-list-inner {
   contain: layout paint;
-}
-
-/* 单列阅读轨：用户气泡 / 单模型答复 / tabs 多答 与输入框同一 max-width。
-   列表外壳铺满主区，并排多答才能用上两侧留白。 */
-.chat-message-rail {
-  width: 100%;
-  max-width: var(--chat-message-rail-max, 56rem);
-  margin-inline: auto;
-}
-
-/* 并排多答：外层吃满列表宽，内层按「N × 单列阅读宽 + 列缝」封顶并居中。
-   列本身再受 max-w-4xl 限制，宽屏 2 列不会各被拉到一千多像素。 */
-.chat-message-group-wide {
-  width: 100%;
-}
-
-.chat-message-group-stack {
-  display: flex;
-  width: 100%;
-  max-width: min(
-    100%,
-    calc(
-      var(--chat-message-group-cols, 1) * var(--chat-message-rail-max, 56rem)
-      + (var(--chat-message-group-cols, 1) - 1) * 0.75rem
-    )
-  );
-  margin-inline: auto;
-  flex-direction: column;
 }
 
 /* 聊天滚动容器禁用浏览器 overflow-anchor：上方行测高时浏览器会偷偷改 scrollTop，
@@ -1382,18 +1352,11 @@ button.chat-composer-status-item:hover {
   }
 }
 
-/* 720–999px 时单列阅读轨几乎占满容器，右侧没有足够留白；为贴滚动条的轨道预留安全区，
-   避免刻度与 Markdown 正文右缘重叠。更宽时单列居中，轨道自然落在其右侧外。 */
+/* 720–999px 时消息列几乎占满容器，右侧没有足够留白；为贴滚动条的轨道预留安全区，
+   避免刻度与 Markdown 正文右缘重叠。更宽时消息列居中，轨道自然落在其右侧外。 */
 @container chat-main (min-width: 720px) and (max-width: 999px) {
   .has-message-navigator .chat-message-list-inner {
     padding-right: 3.25rem;
-  }
-}
-
-/* 并排多答铺满主区后，宽屏也会贴到右侧导航轨。只垫组本身，避免把单列轨挤离输入框中线。 */
-@container chat-main (min-width: 1000px) {
-  .has-message-navigator .chat-message-group-wide {
-    padding-right: 1.75rem;
   }
 }
 

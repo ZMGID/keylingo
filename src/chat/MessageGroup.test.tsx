@@ -135,37 +135,11 @@ describe('MessageGroup — columns 模式', () => {
     expect(reasoningSections[0].getAttribute('aria-hidden')).toBe('false')
     expect(reasoningSections[1].getAttribute('aria-hidden')).toBe('true')
   })
-
-  it('整组铺满主区，单列封顶与单对话阅读宽一致', () => {
-    const { container } = render(
-      <MessageGroup
-        conversationId="c1"
-        groupId="g1"
-        messages={[
-          assistant('a1', 'answer one', 'openai', 'gpt-4o'),
-          assistant('a2', 'answer two', 'anthropic', 'claude-3'),
-        ]}
-        onSelectColumn={() => {}}
-      />,
-    )
-    expect(container.querySelector('.chat-message-group-wide')).toBeTruthy()
-    expect(container.querySelector('.chat-message-group-stack')).toBeTruthy()
-    expect(container.querySelector('.chat-message-rail')).toBeNull()
-    const cols = container.querySelectorAll('.chat-message-group-col')
-    expect(cols).toHaveLength(2)
-    for (const col of cols) {
-      expect(col.className).toMatch(/max-w-4xl/)
-      expect(col.className).not.toMatch(/max-w-\[420px\]/)
-    }
-    expect(
-      (container.querySelector('.chat-message-group-stack') as HTMLElement).style.getPropertyValue('--chat-message-group-cols'),
-    ).toBe('2')
-  })
 })
 
 describe('MessageGroup — tabs 模式（默认）', () => {
   it('默认只整宽渲染选中条（第一条），不显示其它条正文', () => {
-    const { container } = render(
+    render(
       <MessageGroup
         conversationId="c1"
         groupId="g1"
@@ -176,9 +150,7 @@ describe('MessageGroup — tabs 模式（默认）', () => {
         onSelectColumn={() => {}}
       />,
     )
-    // tabs 模式：只渲染第一条正文，走单列阅读轨。
-    expect(container.querySelector('.chat-message-rail')).toBeTruthy()
-    expect(container.querySelector('.chat-message-group-wide')).toBeNull()
+    // tabs 模式：只渲染第一条正文。
     expect(screen.getByText('answer one')).toBeInTheDocument()
     expect(screen.queryByText('answer two')).not.toBeInTheDocument()
     // 列头「用这条继续」按钮在 tabs 模式不渲染（交给 footer chip）。
@@ -230,7 +202,7 @@ describe('MessageGroup — tabs 模式（默认）', () => {
   })
 
   it('切到 columns 模式：N 列横向并排出现', async () => {
-    const { container } = render(
+    render(
       <MessageGroup
         conversationId="c1"
         groupId="g1"
@@ -242,16 +214,13 @@ describe('MessageGroup — tabs 模式（默认）', () => {
       />,
     )
     expect(screen.queryByText('answer two')).not.toBeInTheDocument()
-    expect(container.querySelector('.chat-message-rail')).toBeTruthy()
     // 点 footer「并排」按钮。
     const columnsBtn = screen.getByTitle('并排显示（多列）')
     await act(async () => {
       columnsBtn.click()
     })
-    // 两条都整列渲染出来，并改走铺满主区的并排栈。
+    // 两条都整列渲染出来。
     expect(screen.getByText('answer one')).toBeInTheDocument()
     expect(screen.getByText('answer two')).toBeInTheDocument()
-    expect(container.querySelector('.chat-message-group-wide')).toBeTruthy()
-    expect(container.querySelector('.chat-message-rail')).toBeNull()
   })
 })

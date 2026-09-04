@@ -107,9 +107,6 @@ const LIST_EDGE_PADDING_PX = 16
 // 重写时丢了（8791000）。行高对 32px 内的宽度差不敏感（换行差 ~4 个拉丁字符），
 // 真实高度由 measureElement 兜底。
 const CONTENT_WIDTH_BUCKET_PX = 32
-// 单列阅读宽：max-w-4xl(896) − px-6×2(48)。列表外壳铺满主区后，估高仍按轨内换行宽
-// 量化，否则宽屏按整区宽度估、实际在 rail 里换行，历史行先矮后跳。
-const CHAT_RAIL_MAX_CONTENT_PX = 848
 
 // 导航器高亮同步的最小间隔。这趟同步是 querySelectorAll + 逐行 getBoundingClientRect，
 // 若 virtualizer 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
@@ -158,10 +155,6 @@ type RenderItem =
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
   | { kind: 'compaction-progress'; key: string; afterIndex: number }
   | { kind: 'context-clear-divider'; key: string; boundary: ContextClearBoundaryView; animate: boolean }
-
-function usesMessageRail(item: RenderItem): boolean {
-  return item.kind !== 'group' && item.kind !== 'live-group' && item.kind !== 'spacer'
-}
 
 function measurementKey(item: RenderItem): string {
   if (item.kind === 'message') {
@@ -454,8 +447,7 @@ function MessageListBase({
     if (!contentEl) return
     const updateWidth = (width: number) => {
       // 量化到桶再落 state：拖动过程中只在跨桶时重渲/换 layoutKey（见 CONTENT_WIDTH_BUCKET_PX）。
-      const clamped = Math.min(CHAT_RAIL_MAX_CONTENT_PX, Math.max(0, width))
-      const next = Math.max(280, Math.round(clamped / CONTENT_WIDTH_BUCKET_PX) * CONTENT_WIDTH_BUCKET_PX)
+      const next = Math.max(280, Math.round(width / CONTENT_WIDTH_BUCKET_PX) * CONTENT_WIDTH_BUCKET_PX)
       setContentWidth((current) => current === next ? current : next)
     }
     const rect = contentEl.getBoundingClientRect()
@@ -2044,20 +2036,16 @@ function MessageListBase({
           data-chat-message-list-item={dynamicItem.kind}
           data-message-id={dynamicItem.kind === 'streaming' ? dynamicItem.message.id : undefined}
         >
-          {usesMessageRail(dynamicItem)
-            ? <div className="chat-message-rail">{renderItem(dynamicItem)}</div>
-            : renderItem(dynamicItem)}
+          {renderItem(dynamicItem)}
         </div>
       )}
       {errorItem && (
         <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
-          <div className="chat-message-rail">{renderItem(errorItem)}</div>
+          {renderItem(errorItem)}
         </div>
       )}
       {(messages.length > 0 || streaming) && (
-        <div className="chat-message-rail">
-          <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} lang={lang} />
-        </div>
+        <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} lang={lang} />
       )}
       <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
     </div>
@@ -2082,7 +2070,7 @@ function MessageListBase({
 
 
       >
-        <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full px-6">
+        <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
           <div
             className="relative w-full"
             style={{ height: virtualizer.getTotalSize() }}
@@ -2095,7 +2083,6 @@ function MessageListBase({
                 : item.kind === 'streaming'
                   ? item.message.id
                   : undefined
-              const rendered = renderItem(item)
               return (
                 <div
                   key={virtualItem.key}
@@ -2108,7 +2095,7 @@ function MessageListBase({
                   className="absolute left-0 top-0 w-full pb-0.5"
                   style={{ transform: `translateY(${virtualItem.start}px)` }}
                 >
-                  {usesMessageRail(item) ? <div className="chat-message-rail">{rendered}</div> : rendered}
+                  {renderItem(item)}
                 </div>
               )
             })}

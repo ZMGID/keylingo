@@ -513,27 +513,4 @@ describe('MessageList ← streamingStore 集成', () => {
 
     expect(screen.queryByRole('button', { name: '回到底部' })).not.toBeInTheDocument()
   })
-
-  it('单列消息走阅读轨，并排多答组不套进 max-w-4xl', async () => {
-    const { container } = render(
-      <MessageList
-        conversationId="rail-c1"
-        messages={[
-          { id: 'u1', role: 'user', content: '今天是周几', timestamp: 1, group_id: 'g1' },
-          { id: 'a1', role: 'assistant', content: '周一', timestamp: 2, group_id: 'g1', provider_id: 'a', model: 'm1' },
-          { id: 'a2', role: 'assistant', content: '星期二', timestamp: 3, group_id: 'g1', provider_id: 'b', model: 'm2' },
-          { id: 'u2', role: 'user', content: '今天北京天气如何', timestamp: 4 },
-          { id: 'a3', role: 'assistant', content: '晴', timestamp: 5 },
-        ]}
-      />,
-    )
-    await flush()
-    const inner = container.querySelector('.chat-message-list-inner')
-    expect(inner?.className).not.toMatch(/max-w-4xl/)
-    const userRow = container.querySelector('[data-message-id="u2"]')
-    expect(userRow?.querySelector('.chat-message-rail')).toBeTruthy()
-    const groupRow = container.querySelector('[data-chat-message-list-item="group"]')
-    expect(groupRow).toBeTruthy()
-    expect(groupRow?.querySelector(':scope > .chat-message-rail')).toBeNull()
-  })
 })
