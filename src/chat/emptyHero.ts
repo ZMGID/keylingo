@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Lang } from '../settings/i18n'
+import type { BlobAntic } from './kivioBlobSim'
 
 /** 空会话标题：短、跟墨团配。换句间隔随机，大约一分钟上下。 */
 export const EMPTY_HERO_ROTATE_MIN_MS = 45_000
@@ -23,6 +24,9 @@ const GREETINGS: Record<Lang, readonly string[]> = {
     '有事尽管说',
     '别空转了',
     '先干为敬',
+    '来了来了',
+    '今天搞点什么',
+    '闲着也是闲着',
   ],
   en: [
     "What's next?",
@@ -34,6 +38,9 @@ const GREETINGS: Record<Lang, readonly string[]> = {
     'Go ahead.',
     'Quit idling.',
     'Work first.',
+    'Here I am.',
+    "What're we doing?",
+    'Might as well.',
   ],
 }
 
@@ -154,6 +161,59 @@ export function emptyHeroJab(
   const choices = last ? pool.filter((line) => line !== last) : pool
   const list = choices.length > 0 ? choices : pool
   return list[Math.floor(random() * list.length)]
+}
+
+/** 闲置小动作时嘟囔一句（变云 / 变方 / 竖起来 / 蹦一下），说完收回。不是每次都说：
+ *  蹦是最常见的小动作（每半分钟左右一次），说得少些；变形态本身就稀罕，多半会念一句。 */
+export const EMPTY_HERO_MUTTER_MS = 3200
+export const EMPTY_HERO_MUTTER_CHANCE = 0.75
+export const EMPTY_HERO_MUTTER_HOP_CHANCE = 0.3
+
+const MUTTERS: Record<Lang, Partial<Record<BlobAntic, readonly string[]>>> = {
+  zh: {
+    cloud: ['走神了', '飘一会', '在想别的', '云一下'],
+    squircle: ['今天装方的', '方一下', '换个形状', '有棱有角'],
+    egg: ['竖起来听', '有动静？', '站直了', '警觉'],
+    hop: ['活动一下', '蹦', '腿麻了', '抖抖'],
+  },
+  en: {
+    cloud: ['Zoning out.', 'Drifting.', 'Elsewhere.', 'Cloud mode.'],
+    squircle: ['Boxy today.', 'Squared up.', 'New shape.', 'Edgy.'],
+    egg: ['Ears up.', 'Heard something?', 'Standing tall.', 'Alert.'],
+    hop: ['Stretching.', 'Boing.', 'Legs asleep.', 'Shake it off.'],
+  },
+}
+
+export function emptyHeroMutter(
+  lang: Lang,
+  kind: BlobAntic,
+  random = Math.random,
+): string | null {
+  const pool = MUTTERS[lang][kind]
+  if (!pool || pool.length === 0) return null
+  if (random() >= (kind === 'hop' ? EMPTY_HERO_MUTTER_HOP_CHANCE : EMPTY_HERO_MUTTER_CHANCE)) return null
+  return pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]
+}
+
+export function useEmptyHeroMutter(lang: Lang) {
+  const [mutter, setMutter] = useState<string | null>(null)
+  const timerRef = useRef(0)
+
+  useEffect(() => () => window.clearTimeout(timerRef.current), [])
+
+  useEffect(() => {
+    setMutter(null)
+  }, [lang])
+
+  const onAntic = useCallback((kind: BlobAntic) => {
+    const line = emptyHeroMutter(lang, kind)
+    if (!line) return
+    setMutter(line)
+    window.clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(() => setMutter(null), EMPTY_HERO_MUTTER_MS)
+  }, [lang])
+
+  return { mutter, onAntic }
 }
 
 export function useEmptyHeroJab(lang: Lang) {

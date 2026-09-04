@@ -2045,11 +2045,11 @@ function MessageListBase({
         </div>
       )}
       {(messages.length > 0 || streaming) && (
-        <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
+        <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} lang={lang} />
       )}
       <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
     </div>
-  ), [dynamicItem, errorItem, liveGroup, messages.length, renderItem, streaming, streamFrozen])
+  ), [dynamicItem, errorItem, lang, liveGroup, messages.length, renderItem, streaming, streamFrozen])
 
   return (
     <div className={`relative flex min-h-0 flex-1 flex-col ${navigatorTurnCount >= 4 ? 'has-message-navigator' : ''}`}>

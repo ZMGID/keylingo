@@ -8077,6 +8077,19 @@ input[type="password"]::-ms-clear {
   .kv-stream-dot-logo .dt { animation: none; transform: none; fill-opacity: 1; }
 }
 
+/* 墨团在状态行末尾接的那句嘴：淡入 + 从左滑 4px。key 随句子变，换句就重播。 */
+.kv-blob-quip {
+  display: inline-block;
+  animation: kv-blob-quip-in 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes kv-blob-quip-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kv-blob-quip { animation: none; }
+}
+
 .chat-conversation-loading {
   background: var(--theme-surface-soft);
 }

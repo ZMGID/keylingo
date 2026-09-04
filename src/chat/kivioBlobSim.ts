@@ -1,10 +1,26 @@
-export const CX = 120
-export const CY = 120
-export const BODY_R = 78
-export const EYE_POINTS = 48
+import {
+  BODY_R,
+  CX,
+  CY,
+  EYE_POINTS,
+  bodyPoints,
+  centroid,
+  faceBlinks,
+  facePoints,
+  lerpPoly,
+  polyPath,
+  type BodyShape,
+  type FaceName,
+  type Pt,
+} from './kivioBlobShapes'
+
+export { CX, CY, BODY_R, EYE_POINTS, polyPath }
+export type { BodyShape, FaceName }
+
 export const BLOB_BLUE = '#1d6bf0'
 export const BLOB_EYE = '#f3efe6'
 export const BLOB_POKE_RED = '#e23b2e'
+const BLOB_ERROR = '#c45c2a'
 
 function mixHex(a: string, b: string, t: number): string {
   const u = clamp(t, 0, 1)
@@ -13,12 +29,18 @@ function mixHex(a: string, b: string, t: number): string {
   return `#${[0, 1, 2].map((i) => m(i).toString(16).padStart(2, '0')).join('')}`
 }
 
-/** 跟生成过程对齐的几张脸。几何是 Kivio 自己的 stadium，不是 xAI 眼环。 */
-export type BlobMood = 'idle' | 'think' | 'search' | 'work' | 'speak' | 'error'
+/**
+ * 跟生成过程对齐的心情。idle 闲着；think / search / work / speak 是一轮生成里的四个阶段；
+ * error 翻车；done 是刚收工那两秒的小得意；wait 是停下来等用户（问问题 / 等审批）。
+ */
+export type BlobMood = 'idle' | 'think' | 'search' | 'work' | 'speak' | 'error' | 'done' | 'wait'
 
 const DT = 1 / 120
 // 显式标注:两表三元取用后是同一类型,元组才能直接 spread 进 stepSpring(TS2556)。
-type SpringTable = Record<'spin' | 'x' | 'y' | 'squash' | 'blink' | 'gaze' | 'morph' | 'boost', readonly [number, number]>
+type SpringTable = Record<
+  'spin' | 'x' | 'y' | 'squash' | 'blink' | 'gaze' | 'morph' | 'body' | 'boost',
+  readonly [number, number]
+>
 const SPR: SpringTable = {
   spin: [5, 0.9],
   x: [3.5, 1],
@@ -27,6 +49,7 @@ const SPR: SpringTable = {
   blink: [26, 1],
   gaze: [13, 1],
   morph: [7, 1],
+  body: [6, 0.92],
   boost: [9, 0.85],
 }
 
@@ -39,25 +62,57 @@ const SPR_IDLE: SpringTable = {
   blink: [9, 1],
   gaze: [2.6, 1],
   morph: [2.2, 1],
+  body: [1.9, 1],
   boost: [3.2, 0.9],
 }
 
-const PLAY: Record<BlobMood, number[]> = {
-  idle: [0, 8, 3, 10, 1, 9],
-  think: [8, 15, 14, 12, 5],
-  search: [9, 3, 12, 17, 2],
-  work: [7, 15, 10, 16],
-  speak: [10, 1, 11],
-  error: [7, 16],
+/** 每个心情轮播的脸。第 0 张是进入该心情时先摆的那张。 */
+const FACE_PLAY: Record<BlobMood, FaceName[]> = {
+  idle: ['neutral', 'dots', 'neutral', 'smirk', 'neutral', 'peek', 'sleepy', 'neutral', 'hmm'],
+  think: ['lookUp', 'hmm', 'lines', 'neutral', 'lookUp', 'focus'],
+  search: ['wide', 'peek', 'dots', 'wide', 'neutral'],
+  work: ['focus', 'lines', 'focus', 'neutral', 'dots'],
+  speak: ['neutral', 'dots', 'happy', 'neutral', 'hmm'],
+  error: ['dizzy', 'worry', 'tiny', 'dizzy', 'lines'],
+  done: ['happy', 'sparkle', 'happy', 'content'],
+  wait: ['wide', 'neutral', 'wide', 'hmm'],
 }
-const HOLD: Record<BlobMood, [number, number]> = {
+const FACE_HOLD: Record<BlobMood, [number, number]> = {
   idle: [5000, 18000],
   think: [2000, 3600],
   search: [1000, 1800],
   work: [1800, 3200],
   speak: [2800, 5000],
   error: [2200, 3800],
+  done: [700, 1100],
+  wait: [2600, 4800],
 }
+
+/** 身体形态轮播：大多数时候是圆，状态借一个形态来说话。 */
+const BODY_PLAY: Record<BlobMood, BodyShape[]> = {
+  idle: ['circle'],
+  think: ['cloud', 'cloud', 'circle', 'cloud'],
+  search: ['egg', 'egg', 'circle'],
+  work: ['squircle', 'squircle', 'circle', 'squircle'],
+  speak: ['bubble', 'circle', 'bubble', 'bubble'],
+  error: ['puddle'],
+  done: ['circle'],
+  wait: ['circle', 'egg'],
+}
+const BODY_HOLD: Record<BlobMood, [number, number]> = {
+  idle: [1e9, 1e9],
+  think: [3500, 7000],
+  search: [2500, 5000],
+  work: [3000, 6500],
+  speak: [3000, 6000],
+  error: [1e9, 1e9],
+  done: [1e9, 1e9],
+  wait: [4000, 8000],
+}
+/** 闲置偶尔随机变一下形态玩（连同 hop 一起对外汇报，让空态标题能接一句嘴）。 */
+const IDLE_ANTIC_SHAPES: BodyShape[] = ['squircle', 'cloud', 'egg']
+export type BlobAntic = BodyShape | 'hop'
+
 const BLINK: Record<BlobMood, [number, number] | null> = {
   idle: [4000, 16000],
   think: [3500, 7000],
@@ -65,8 +120,10 @@ const BLINK: Record<BlobMood, [number, number] | null> = {
   work: [2800, 5500],
   speak: [3000, 7000],
   error: [3500, 7000],
+  done: null,
+  wait: [2200, 4800],
 }
-const WINK = new Set<BlobMood>(['idle', 'speak'])
+const WINK = new Set<BlobMood>(['idle', 'speak', 'done'])
 const HOP_SEGS = [
   { h: 48, d: 0.5 },
   { h: 28, d: 0.382 },
@@ -76,9 +133,7 @@ const HOP_SEGS = [
 const HOP_DUR = HOP_SEGS.reduce((s, x) => s + x.d, 0)
 
 type Spring = { x: number; v: number; t: number }
-type Pt = [number, number]
 
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t
 const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n))
 const k2 = (n: number) => (n < 0.5 ? 4 * n * n * n : 1 - (-2 * n + 2) ** 3 / 2)
 
@@ -95,71 +150,56 @@ function stepSpring(s: Spring, freq: number, damp: number, dt: number) {
   }
 }
 
-export function polyPath(pts: Pt[]): string {
-  return `M${pts.map((p) => `${p[0].toFixed(2)} ${p[1].toFixed(2)}`).join('L')}Z`
-}
+/**
+ * 多边形组的变形器：from → to 走一根 0→1 的弹簧。中途改目标时把**当前插值结果**烘成新的
+ * from，不会像直接换 to 那样跳一帧（身体换形态很大块，跳一下很明显）。
+ */
+class PolyMorph {
+  from: Pt[][]
+  to: Pt[][]
+  key: string
+  s = spring(1)
 
-function lerpPoly(a: Pt[], b: Pt[], t: number): Pt[] {
-  return a.map((p, i) => [lerp(p[0], b[i][0], t), lerp(p[1], b[i][1], t)])
-}
-
-function centroid(pts: Pt[]): Pt {
-  let x = 0
-  let y = 0
-  for (const p of pts) {
-    x += p[0]
-    y += p[1]
+  constructor(key: string, pts: Pt[][]) {
+    this.key = key
+    this.from = pts
+    this.to = pts
   }
-  const n = pts.length || 1
-  return [x / n, y / n]
-}
 
-function stadium(rx: number, ry: number, tilt: number, ox: number, oy: number, side: number): Pt[] {
-  const pts: Pt[] = []
-  for (let i = 0; i < EYE_POINTS; i++) {
-    const a = (i / EYE_POINTS) * Math.PI * 2 - Math.PI / 2
-    const c = Math.cos(a)
-    const s = Math.sin(a)
-    const px = rx * Math.sign(c) * Math.abs(c) ** 0.62
-    const py = ry * Math.sign(s) * Math.abs(s) ** 0.62
-    const x = px * Math.cos(tilt) - py * Math.sin(tilt)
-    const y = px * Math.sin(tilt) + py * Math.cos(tilt)
-    pts.push([CX + side * ox + x, CY + oy + y])
+  retarget(key: string, pts: Pt[][]) {
+    if (key === this.key) return
+    const k = k2(clamp(this.s.x, 0, 1))
+    this.from = this.to.map((poly, i) => lerpPoly(this.from[i], poly, k))
+    this.to = pts
+    this.key = key
+    this.s.x = 0
+    this.s.v = 0
+    this.s.t = 1
   }
-  return pts
-}
 
-/** 原创 stadium 眼。语义对齐 grok 播放列表，坐标不搬 xAI。 */
-const EYE: Record<number, { rx: number; ry: number; tilt: number; x: number; y: number; tiltR?: number }> = {
-  0: { rx: 9.4, ry: 24.5, tilt: 0.46, x: 23, y: -2 },
-  1: { rx: 14.5, ry: 15.5, tilt: 0.28, x: 23, y: 2 },
-  2: { rx: 11.2, ry: 26.5, tilt: 0.16, x: 25, y: -8 },
-  3: { rx: 13.2, ry: 13.8, tilt: 0.5, x: 21, y: -11 },
-  4: { rx: 10.4, ry: 20, tilt: 0.55, x: 22, y: 3, tiltR: -0.55 },
-  5: { rx: 16, ry: 3.4, tilt: 0.18, x: 23, y: 5 },
-  6: { rx: 13.4, ry: 28, tilt: 0.1, x: 24, y: -6 },
-  7: { rx: 11, ry: 18, tilt: 0.72, x: 22, y: 7 },
-  8: { rx: 8.2, ry: 22.5, tilt: 0.5, x: 24, y: -1 },
-  9: { rx: 12.2, ry: 18.5, tilt: 0.22, x: 28, y: -4 },
-  10: { rx: 12.6, ry: 16.2, tilt: 0.38, x: 22, y: 4 },
-  11: { rx: 14.2, ry: 11.8, tilt: 0.22, x: 22, y: 1 },
-  12: { rx: 10.1, ry: 22.4, tilt: 0.08, x: 26, y: -10 },
-  13: { rx: 15.2, ry: 2.8, tilt: 0.12, x: 22, y: 6 },
-  14: { rx: 11.1, ry: 14.2, tilt: 0.62, x: 20, y: 2, tiltR: -0.38 },
-  15: { rx: 8.5, ry: 16.4, tilt: 0.4, x: 21, y: -3 },
-  16: { rx: 10.2, ry: 17.2, tilt: 0.85, x: 20, y: 5 },
-  17: { rx: 15.1, ry: 20.2, tilt: 0.18, x: 24, y: -6 },
-}
+  snap(key: string, pts: Pt[][]) {
+    this.key = key
+    this.from = pts
+    this.to = pts
+    this.s.x = 1
+    this.s.v = 0
+    this.s.t = 1
+  }
 
-function eyesOf(id: number): [Pt[], Pt[]] {
-  const e = EYE[id] ?? EYE[0]
-  const tL = e.tilt
-  const tR = e.tiltR ?? e.tilt
-  return [stadium(e.rx, e.ry, tL, e.x, e.y, -1), stadium(e.rx, e.ry, tR, e.x, e.y, 1)]
-}
+  progress(): number {
+    return k2(clamp(this.s.x, 0, 1))
+  }
 
-const EYE_CACHE: Record<number, [Pt[], Pt[]]> = {}
-for (const id of Object.keys(EYE).map(Number)) EYE_CACHE[id] = eyesOf(id)
+  current(): Pt[][] {
+    const k = this.progress()
+    if (k >= 1) return this.to
+    return this.to.map((poly, i) => lerpPoly(this.from[i], poly, k))
+  }
+
+  settled(): boolean {
+    return this.s.x > 0.97
+  }
+}
 
 type BlinkKey = { at: number; v: number }
 
@@ -212,10 +252,15 @@ export function resolveBlobMood(input: {
   contentLen?: number
   reasoningStreaming?: boolean
   runningToolNames?: string[]
+  /** 正在等用户回答 / 审批：停下来看着你。 */
+  waiting?: boolean
+  /** 刚收工（StreamStatusLine 记的短窗口）：小得意一下。 */
+  done?: boolean
 }): BlobMood {
   if (input.error && !input.active) return 'error'
-  if (!input.active) return 'idle'
+  if (!input.active) return input.done ? 'done' : 'idle'
   if (input.error) return 'error'
+  if (input.waiting) return 'wait'
   const running = input.runningToolNames ?? []
   if (running.some(isSearchToolName)) return 'search'
   if (running.length > 0) return 'work'
@@ -247,17 +292,20 @@ interface PoseCtx {
   hopUntil: number
   biasUntil: number
   bias: IdleBias
+  /** 闲置随机变的形态；null = 圆。 */
+  antic: BodyShape | null
+  anticUntil: number
 }
 
 function nextIdleBias(
   rand: (a: number, b: number) => number,
   sign: () => number,
-): IdleBias & { hold: [number, number]; hop: boolean } {
+): IdleBias & { hold: [number, number]; hop: boolean; antic: BodyShape | null } {
   const r = rand(0, 1)
-  if (r < 0.38) {
-    return { spin: 0, tx: 0, ty: 0, squash: 1, hold: [4000, 14000], hop: false }
+  if (r < 0.34) {
+    return { spin: 0, tx: 0, ty: 0, squash: 1, hold: [4000, 14000], hop: false, antic: null }
   }
-  if (r < 0.7) {
+  if (r < 0.62) {
     const d = sign()
     return {
       spin: d * rand(6, 14),
@@ -266,22 +314,37 @@ function nextIdleBias(
       squash: 1,
       hold: [3500, 12000],
       hop: false,
+      antic: null,
     }
   }
-  if (r < 0.84) {
-    return { spin: rand(-3, 3), tx: 0, ty: -rand(1.5, 4), squash: 1.02, hold: [2800, 9000], hop: false }
+  if (r < 0.74) {
+    return { spin: rand(-3, 3), tx: 0, ty: -rand(1.5, 4), squash: 1.02, hold: [2800, 9000], hop: false, antic: null }
   }
-  if (r < 0.93) {
-    return { spin: 0, tx: 0, ty: rand(1.5, 4), squash: 0.984, hold: [3500, 11000], hop: false }
+  if (r < 0.82) {
+    return { spin: 0, tx: 0, ty: rand(1.5, 4), squash: 0.984, hold: [3500, 11000], hop: false, antic: null }
   }
-  const d = sign()
+  if (r < 0.92) {
+    const d = sign()
+    return {
+      spin: d * rand(4, 10),
+      tx: d * rand(2, 5),
+      ty: -2,
+      squash: 1,
+      hold: [4000, 13000],
+      hop: true,
+      antic: null,
+    }
+  }
+  // 变个形态玩一会，再慢慢变回圆。
+  const shape = IDLE_ANTIC_SHAPES[Math.min(IDLE_ANTIC_SHAPES.length - 1, Math.floor(rand(0, IDLE_ANTIC_SHAPES.length)))]
   return {
-    spin: d * rand(4, 10),
-    tx: d * rand(2, 5),
-    ty: -2,
+    spin: shape === 'cloud' ? rand(-4, 4) : sign() * rand(3, 8),
+    tx: 0,
+    ty: shape === 'cloud' ? -3 : 0,
     squash: 1,
-    hold: [4000, 13000],
-    hop: true,
+    hold: [3500, 7500],
+    hop: false,
+    antic: shape,
   }
 }
 
@@ -303,9 +366,10 @@ function applyPose(mood: BlobMood, mt: number, now: number, ctx: PoseCtx, rand: 
       tx += Math.sin(now * 0.08) * 5
     }
   } else if (mood === 'think') {
-    spin = -12 + Math.sin(mt * 0.35) * 7
+    // 云是横着飘的，别歪太多；左右慢慢晃 + 轻微上浮。
+    spin = -6 + Math.sin(mt * 0.35) * 5
     tx = Math.sin(mt * 0.3) * 8
-    ty = Math.sin(mt * 0.6) * 4
+    ty = -2 + Math.sin(mt * 0.6) * 4
   } else if (mood === 'search') {
     const et = Math.sin(mt * 1.3)
     spin = et * 16
@@ -332,6 +396,21 @@ function applyPose(mood: BlobMood, mt: number, now: number, ctx: PoseCtx, rand: 
       ty += Math.sin(et * Math.PI) * 6
       spin += Math.sin(et * Math.PI) * 3
     }
+  } else if (mood === 'done') {
+    // 果冻式小蹦：左右晃 + 上下弹 + 拉伸压扁。
+    const et = Math.sin(mt * 2.4)
+    spin = Math.sin(mt * 1.2) * 4
+    tx = Math.sin(mt * 1.1) * 2.5
+    ty = -Math.abs(et) * 3.5
+    squash = 1 + et * 0.025
+    boost = 1.06
+  } else if (mood === 'wait') {
+    // 歪头看着你，偶尔慢慢摆一下。
+    spin = 13 + Math.sin(mt * 0.45) * 3
+    tx = 3
+    ty = -1 + Math.sin(mt * 0.7) * 0.8
+    squash = 1.01
+    boost = 1.03
   } else {
     if (now >= ctx.impulseAt) {
       ctx.shakeUntil = now + 420
@@ -356,6 +435,8 @@ function nextGaze(mood: BlobMood, rand: (a: number, b: number) => number, sign: 
   if (mood === 'search') return { x: sign() * rand(0.7, 1) * 16, y: rand(-1, 1) * 10, hold: [550, 1150] as [number, number] }
   if (mood === 'work') return { x: rand(-0.4, 0.4) * 16, y: rand(0.4, 1) * 10, hold: [1200, 2400] as [number, number] }
   if (mood === 'speak') return { x: rand(-0.3, 0.3) * 16, y: rand(-0.25, 0.25) * 10, hold: [2200, 4200] as [number, number] }
+  if (mood === 'done') return { x: rand(-0.3, 0.3) * 16, y: -rand(0.1, 0.5) * 10, hold: [900, 1600] as [number, number] }
+  if (mood === 'wait') return { x: rand(-0.15, 0.15) * 16, y: -rand(0.5, 0.9) * 10, hold: [1800, 3600] as [number, number] }
   return { x: rand(-0.2, 0.2) * 16, y: 0.2 * 10, hold: [1800, 3200] as [number, number] }
 }
 
@@ -370,6 +451,7 @@ function hopCadence(mood: BlobMood): [number, number] | null {
 export interface BlobPaint {
   rig: string
   body: string
+  bodyD: string
   fill: string
   eyes: [{ d: string; transform: string }, { d: string; transform: string }]
 }
@@ -397,7 +479,8 @@ export function blobScheduleMs(opts: {
 
 export interface BlobSimDebug {
   mood: BlobMood
-  eyeTo: number
+  face: FaceName
+  body: BodyShape
   spin: number
   blink: number
   heat: number
@@ -406,6 +489,8 @@ export interface BlobSimDebug {
 
 export class KivioBlobSim {
   mood: BlobMood = 'idle'
+  /** 闲置小动作（变形态 / 蹦一下）的通知口，空态标题拿它接一句嘴。 */
+  onAntic: ((kind: BlobAntic) => void) | null = null
   private random: () => number
   private reduced: boolean
   private spin = spring(0)
@@ -415,14 +500,15 @@ export class KivioBlobSim {
   private blink = spring(1)
   private gazeX = spring(0)
   private gazeY = spring(0)
-  private morph = spring(1)
   private boost = spring(1)
-  private eyeFrom = 0
-  private eyeTo = 0
-  private eyeIdx = 0
+  private face = new PolyMorph('neutral', facePoints('neutral'))
+  private body = new PolyMorph('circle', [bodyPoints('circle')])
+  private faceIdx = 0
+  private bodyIdx = 0
   private t0 = 0
   private last = 0
-  private eyeUntil = 0
+  private faceUntil = 0
+  private bodyUntil = 0
   private blinkUntil = 0
   private gazeUntil = 0
   private winkAt = -1e9
@@ -434,6 +520,9 @@ export class KivioBlobSim {
   private pokeCount = 0
   private lastPokeAt = -1e9
   private heatHoldUntil = 0
+  /** 被戳时身体的临时形态（压扁 / 装方 / 炸毛）。 */
+  private pokeShape: BodyShape | null = null
+  private pokeShapeUntil = 0
   private blinkQ: BlinkKey[] = []
   private inited = false
   private ctx: PoseCtx = {
@@ -444,6 +533,8 @@ export class KivioBlobSim {
     hopUntil: 0,
     biasUntil: 0,
     bias: { spin: 0, tx: 0, ty: 0, squash: 1 },
+    antic: null,
+    anticUntil: 0,
   }
 
   constructor(opts: { random?: () => number; reducedMotion?: boolean } = {}) {
@@ -454,10 +545,16 @@ export class KivioBlobSim {
   setMood(mood: BlobMood, now = 0) {
     const changed = mood !== this.mood || !this.inited
     this.mood = mood
-    const list = PLAY[mood]
-    this.eyeIdx = 0
-    if (changed) this.morphTo(list[0])
-    this.eyeUntil = now + (mood === 'idle' ? this.span(...HOLD[mood]) : this.rand(...HOLD[mood]))
+    const faces = FACE_PLAY[mood]
+    const bodies = BODY_PLAY[mood]
+    this.faceIdx = 0
+    this.bodyIdx = 0
+    if (changed) {
+      this.face.retarget(faces[0], facePoints(faces[0]))
+      this.body.retarget(bodies[0], [bodyPoints(bodies[0])])
+    }
+    this.faceUntil = now + (mood === 'idle' ? this.span(...FACE_HOLD[mood]) : this.rand(...FACE_HOLD[mood]))
+    this.bodyUntil = now + this.rand(...BODY_HOLD[mood])
     this.blinkUntil = now + (mood === 'idle' ? this.span(1800, 6000) : this.rand(900, 2800))
     this.gazeUntil = now + (mood === 'idle' ? this.span(800, 4200) : this.rand(280, 900))
     const hopEvery = hopCadence(mood)
@@ -469,9 +566,16 @@ export class KivioBlobSim {
       hopUntil: now + (hopEvery ? (mood === 'idle' ? this.span(...hopEvery) : this.rand(...hopEvery)) : 1e12),
       biasUntil: mood === 'idle' ? now + this.span(3000, 10000) : 1e12,
       bias: { spin: 0, tx: 0, ty: 0, squash: 1 },
+      antic: null,
+      anticUntil: 0,
     }
     this.blinkQ = []
-    queueBlink(this.blinkQ, now, this.random, mood === 'idle' ? 2.6 : 1)
+    if (mood === 'done' && changed) {
+      // 收工先蹦一下。
+      this.hopAt = now
+    } else if (faceBlinks(faces[0])) {
+      queueBlink(this.blinkQ, now, this.random, mood === 'idle' ? 2.6 : 1)
+    }
   }
 
   poke(now: number, lookX?: number): number {
@@ -490,8 +594,22 @@ export class KivioBlobSim {
     this.winkAt = now
     this.winkEye = this.random() < 0.5 ? 0 : 1
     this.winkDur = this.mood === 'idle' ? 700 : 320
-    if (this.pokeCount >= 4) this.morphTo(5)
-    if (this.pokeCount >= 7) this.morphTo(13)
+    // 戳一下压扁；戳多了装方；再戳炸毛。
+    if (this.pokeCount >= 7) {
+      this.pokeShape = 'burst'
+      this.pokeShapeUntil = now + 1400
+    } else if (this.pokeCount >= 4) {
+      this.pokeShape = 'squircle'
+      this.pokeShapeUntil = now + 1800
+    } else {
+      this.pokeShape = 'puddle'
+      this.pokeShapeUntil = now + (this.mood === 'idle' ? 520 : 300)
+    }
+    if (this.pokeCount >= 7) this.face.retarget('dizzy', facePoints('dizzy'))
+    else if (this.pokeCount >= 4) this.face.retarget('lines', facePoints('lines'))
+    else if (this.pokeCount >= 2) this.face.retarget('smirk', facePoints('smirk'))
+    else this.face.retarget('flat', facePoints('flat'))
+    this.faceUntil = now + this.rand(1400, 2600)
     if (this.pokeCount >= 5) this.ctx.shakeUntil = now + 420
     if (this.mood === 'idle') {
       this.ctx.bias = {
@@ -501,6 +619,8 @@ export class KivioBlobSim {
         squash: 1.02,
       }
       this.ctx.biasUntil = now + this.span(2500, 8000)
+      // 被戳就别继续装云了。
+      this.ctx.antic = null
     }
     return this.pokeCount
   }
@@ -515,7 +635,8 @@ export class KivioBlobSim {
   debug(): BlobSimDebug {
     return {
       mood: this.mood,
-      eyeTo: this.eyeTo,
+      face: this.face.key as FaceName,
+      body: this.body.key as BodyShape,
       spin: this.spin.x,
       blink: this.blink.x,
       heat: this.pokeHeat,
@@ -530,8 +651,9 @@ export class KivioBlobSim {
     if (now < this.winkAt + this.winkDur) return true
     if (this.hopAt >= 0) return true
     if (now < this.ctx.shakeUntil) return true
+    if (this.pokeShape && now < this.pokeShapeUntil + 600) return true
     if (this.mood === 'idle') return false
-    if (this.morph.x < 0.97) return true
+    if (!this.face.settled() || !this.body.settled()) return true
     if (now < this.ctx.nodEnd) return true
     if (this.mood === 'error') return now < this.ctx.shakeUntil
     return true
@@ -540,7 +662,7 @@ export class KivioBlobSim {
   /** 闲置按呼吸节拍醒；出错只睡到下一次抖动。 */
   nextIdleWakeMs(now: number): number {
     if (this.mood === 'idle') return BLOB_IDLE_BREATHE_MS
-    const wakes = [this.blinkUntil, this.eyeUntil]
+    const wakes = [this.blinkUntil, this.faceUntil, this.bodyUntil]
     if (WINK.has(this.mood)) wakes.push(this.winkUntil)
     if (this.mood === 'error') wakes.push(this.ctx.impulseAt)
     return Math.min(...wakes) - now
@@ -569,19 +691,31 @@ export class KivioBlobSim {
       this.ty.t += this.gazeY.t * 0.16
     }
 
-    if (now >= this.eyeUntil) {
-      const list = PLAY[this.mood]
-      this.eyeIdx = (this.eyeIdx + 1) % list.length
-      this.morphTo(list[this.eyeIdx])
-      this.eyeUntil = now + (this.mood === 'idle' ? this.span(...HOLD[this.mood]) : this.rand(...HOLD[this.mood]))
+    if (now >= this.faceUntil) {
+      const list = FACE_PLAY[this.mood]
+      this.faceIdx = (this.faceIdx + 1) % list.length
+      this.face.retarget(list[this.faceIdx], facePoints(list[this.faceIdx]))
+      this.faceUntil = now + (this.mood === 'idle' ? this.span(...FACE_HOLD[this.mood]) : this.rand(...FACE_HOLD[this.mood]))
     }
+    if (now >= this.bodyUntil) {
+      const list = BODY_PLAY[this.mood]
+      this.bodyIdx = (this.bodyIdx + 1) % list.length
+      this.bodyUntil = now + this.rand(...BODY_HOLD[this.mood])
+    }
+    if (this.pokeShape && now >= this.pokeShapeUntil) this.pokeShape = null
+    if (this.ctx.antic && now >= this.ctx.anticUntil) this.ctx.antic = null
+    const bodyShape = this.bodyTarget(now)
+    this.body.retarget(bodyShape, [bodyPoints(bodyShape)])
+
+    // 闭着的脸（笑弯 / x_x / 星星 / 一条线）不眨；但节拍照走，否则 nextIdleWakeMs 会拿到过期时间。
+    const blinkable = faceBlinks(this.face.key as FaceName)
     const cad = BLINK[this.mood]
     if (cad && now >= this.blinkUntil) {
-      queueBlink(this.blinkQ, now, this.random, this.mood === 'idle' ? 2.6 : 1)
+      if (blinkable) queueBlink(this.blinkQ, now, this.random, this.mood === 'idle' ? 2.6 : 1)
       this.blinkUntil = now + (this.mood === 'idle' ? this.span(...cad) : this.rand(...cad))
     }
     const key = consumeBlink(this.blinkQ, now)
-    this.blink.t = key ?? (this.blinkQ.length ? this.blink.t : pose.lid)
+    this.blink.t = blinkable ? key ?? (this.blinkQ.length ? this.blink.t : pose.lid) : 1
 
     if (now >= this.gazeUntil) {
       const gz = nextGaze(this.mood, (a, b) => this.rand(a, b), () => this.sign())
@@ -590,21 +724,32 @@ export class KivioBlobSim {
       this.gazeUntil = now + (this.mood === 'idle' ? this.span(...gz.hold) : this.rand(...gz.hold))
     }
     if (WINK.has(this.mood) && now >= this.winkUntil) {
-      this.winkAt = now
-      this.winkEye = this.random() < 0.5 ? 0 : 1
-      this.winkDur = this.mood === 'idle' ? 700 : 320
+      if (blinkable) {
+        this.winkAt = now
+        this.winkEye = this.random() < 0.5 ? 0 : 1
+        this.winkDur = this.mood === 'idle' ? 700 : 320
+      }
       this.winkUntil = now + (this.mood === 'idle' ? this.span(8000, 24000) : this.rand(4500, 10000))
     }
     const hopEvery = hopCadence(this.mood)
     if (hopEvery && now >= this.ctx.hopUntil && this.hopAt < 0) {
       this.hopAt = now
       this.ctx.hopUntil = now + (this.mood === 'idle' ? this.span(...hopEvery) : this.rand(...hopEvery))
+      if (this.mood === 'idle') this.onAntic?.('hop')
     }
     if (this.mood === 'idle' && !this.reduced && now >= this.ctx.biasUntil) {
       const next = nextIdleBias((a, b) => this.rand(a, b), () => this.sign())
       this.ctx.bias = { spin: next.spin, tx: next.tx, ty: next.ty, squash: next.squash }
       this.ctx.biasUntil = now + this.span(...next.hold)
-      if (next.hop && this.hopAt < 0) this.hopAt = now
+      if (next.hop && this.hopAt < 0) {
+        this.hopAt = now
+        this.onAntic?.('hop')
+      }
+      if (next.antic) {
+        this.ctx.antic = next.antic
+        this.ctx.anticUntil = now + this.rand(...next.hold)
+        this.onAntic?.(next.antic)
+      }
     }
 
     const n = Math.max(1, Math.ceil(dt / DT))
@@ -618,7 +763,8 @@ export class KivioBlobSim {
       stepSpring(this.blink, ...spr.blink, step)
       stepSpring(this.gazeX, ...spr.gaze, step)
       stepSpring(this.gazeY, ...spr.gaze, step)
-      stepSpring(this.morph, ...spr.morph, step)
+      stepSpring(this.face.s, ...spr.morph, step)
+      stepSpring(this.body.s, ...(this.pokeShape ? SPR.body : spr.body), step)
       stepSpring(this.boost, ...spr.boost, step)
     }
     if (this.reduced) {
@@ -629,9 +775,11 @@ export class KivioBlobSim {
       this.blink.x = 1
       this.gazeX.x = 0
       this.gazeY.x = 0
-      this.morph.x = 1
       this.boost.x = 1
       this.hopAt = -1
+      const faces = FACE_PLAY[this.mood]
+      this.face.snap(faces[0], facePoints(faces[0]))
+      this.body.snap('circle', [bodyPoints('circle')])
     }
 
     if (now > this.heatHoldUntil && this.pokeHeat > 0) {
@@ -645,24 +793,22 @@ export class KivioBlobSim {
     let hop = hopY(
       this.hopAt,
       now,
-      this.mood === 'idle' ? 0.36 + this.pokeHeat * 0.5 : 1,
+      this.mood === 'idle' ? 0.36 + this.pokeHeat * 0.5 : this.mood === 'done' ? 0.7 : 1,
       this.mood === 'idle' ? 2.1 : 1,
     )
     if (hop == null) {
       this.hopAt = -1
       hop = 0
     }
-    const k = k2(clamp(this.morph.x, 0, 1))
-    const from = EYE_CACHE[this.eyeFrom]
-    const to = EYE_CACHE[this.eyeTo]
-    const polys = [lerpPoly(from[0], to[0], k), lerpPoly(from[1], to[1], k)]
+    const polys = this.face.current()
+    const k = this.face.progress()
     const gx = this.gazeX.x
     const gy = this.gazeY.x
     const pulse = 1 + (this.mood === 'idle' ? 0.03 : 0.07) * Math.sin(k * Math.PI)
     const boost = this.boost.x
     const eyes = [0, 1].map((i) => {
       let lid = this.blink.x
-      if (i === this.winkEye && now < this.winkAt + this.winkDur) {
+      if (blinkable && i === this.winkEye && now < this.winkAt + this.winkDur) {
         const xr = (now - this.winkAt) / this.winkDur
         const fr = xr < 0.42 ? 1 - xr / 0.42 : (xr - 0.42) / 0.58
         lid = Math.min(lid, Math.max(fr, 0.04))
@@ -685,8 +831,9 @@ export class KivioBlobSim {
     return {
       rig: `translate(${this.tx.x.toFixed(2)} ${(this.ty.x + hop).toFixed(2)}) rotate(${this.spin.x.toFixed(2)} ${CX} ${CY})`,
       body: `translate(${CX} ${CY}) scale(1 ${this.squash.x.toFixed(3)}) translate(${-CX} ${-CY})`,
+      bodyD: polyPath(this.body.current()[0]),
       fill: this.mood === 'error'
-        ? '#c45c2a'
+        ? BLOB_ERROR
         : this.pokeHeat <= 0
           ? BLOB_BLUE
           : mixHex(BLOB_BLUE, BLOB_POKE_RED, this.pokeHeat),
@@ -694,13 +841,13 @@ export class KivioBlobSim {
     }
   }
 
-  private morphTo(to: number) {
-    if (to === this.eyeTo && this.morph.x > 0.96) return
-    this.eyeFrom = this.eyeTo
-    this.eyeTo = to
-    this.morph.x = 0
-    this.morph.v = 0
-    this.morph.t = 1
+  /** 此刻身体该是什么形：被戳 > 出错抖动炸毛 > 闲置小动作 > 心情轮播。 */
+  private bodyTarget(now: number): BodyShape {
+    if (this.pokeShape) return this.pokeShape
+    if (this.mood === 'error') return now < this.ctx.shakeUntil ? 'burst' : 'puddle'
+    if (this.mood === 'idle') return this.ctx.antic ?? 'circle'
+    const list = BODY_PLAY[this.mood]
+    return list[this.bodyIdx % list.length]
   }
 
   private rand(a: number, b: number) {

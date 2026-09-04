@@ -1,8 +1,11 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { KivioBlob, type BlobMood } from './KivioBlob'
 import { getCoarse, getSnapshot } from './streamingStore'
 import { resolveBlobMood } from './kivioBlobSim'
+import { isAskUserToolName } from './askUserTools'
+import { useStatusQuip } from './blobQuips'
 import { useConversationTransition } from './conversationTransitionStore'
+import type { Lang } from '../settings/i18n'
 
 export const StreamStatusLogo = memo(function StreamStatusLogo({
   size = 28,
@@ -20,17 +23,21 @@ function toolName(tool: { tool_name?: string; toolName?: string; name?: string }
   return tool.tool_name || tool.toolName || tool.name || ''
 }
 
-function moodFromRun(active: boolean): BlobMood {
+/** 刚收工后小得意的窗口：happy 脸 + 蹦一下 + 「搞定」。 */
+export const BLOB_DONE_MS = 2600
+
+function moodFromRun(active: boolean, doneUntil: number, now: number): BlobMood {
   const snapshot = getSnapshot()
   const coarse = getCoarse()
+  const running = snapshot.toolCalls.filter((tool) => tool.status === 'running')
   return resolveBlobMood({
     active,
     error: Boolean(coarse.streamError),
     contentLen: snapshot.content.length,
     reasoningStreaming: snapshot.reasoningStreaming,
-    runningToolNames: snapshot.toolCalls
-      .filter((tool) => tool.status === 'running')
-      .map(toolName),
+    runningToolNames: running.map(toolName),
+    waiting: running.some((tool) => isAskUserToolName(toolName(tool))),
+    done: now < doneUntil,
   })
 }
 
@@ -62,6 +69,7 @@ function estimateTokens(text: string): number {
 interface StreamStatusLineProps {
   /** 生成中（按检索/干活/说话/思考切脸 + 实时信息）；false = 闲置或出错脸 */
   active: boolean
+  lang?: Lang
 }
 
 interface LiveStats {
@@ -73,26 +81,36 @@ interface LiveStats {
 
 /**
  * 消息流末尾常驻的存在标记（对标 Claude Code 的小星号）：闲置时蓝色墨团眨眼，
- * 生成中按状态切脸（思考 / 检索 / 干活 / 说话）+ 「耗时 · N tokens · K running」。
+ * 生成中按状态切脸（思考 / 检索 / 干活 / 说话 / 等你）+ 「耗时 · N tokens · K running」，
+ * 偶尔在末尾自己接一句嘴（blobQuips），收工那两秒得意一下。
  *
  * 实时信息不走 props、不订阅 store（那是每帧一响）：250ms 从 streamingStore 快照
  * 读一次，token 从已流出的正文 + 思维链估算 —— 任何运行时（内置 / 外部 CLI）都有数，
  * 且和 Claude 一样随输出平滑上涨；后端的 live 用量事件太稀（每 planning 轮一次）不用。
  */
-export const StreamStatusLine = memo(function StreamStatusLine({ active }: StreamStatusLineProps) {
+export const StreamStatusLine = memo(function StreamStatusLine({ active, lang = 'zh' }: StreamStatusLineProps) {
   const { loading } = useConversationTransition()
   const [stats, setStats] = useState<LiveStats | null>(null)
-  const [mood, setMood] = useState<BlobMood>(() => moodFromRun(active))
+  const doneUntilRef = useRef(0)
+  const prevActiveRef = useRef(active)
+  const [mood, setMood] = useState<BlobMood>(() => moodFromRun(active, 0, Date.now()))
   useEffect(() => {
+    // 生成 true→false 且没翻车、没被停：进入「搞定」窗口。
+    if (prevActiveRef.current && !active) {
+      const coarse = getCoarse()
+      doneUntilRef.current = coarse.streamError || coarse.cancelling ? 0 : Date.now() + BLOB_DONE_MS
+    }
+    prevActiveRef.current = active
     const update = () => {
-      setMood(moodFromRun(active))
+      const now = Date.now()
+      setMood(moodFromRun(active, doneUntilRef.current, now))
       if (!active) {
         setStats(null)
         return
       }
       const snapshot = getSnapshot()
       setStats({
-        elapsedMs: snapshot.startedAt != null ? Date.now() - snapshot.startedAt : 0,
+        elapsedMs: snapshot.startedAt != null ? now - snapshot.startedAt : 0,
         tokens: estimateTokens(snapshot.content) + estimateTokens(snapshot.reasoning),
         running: snapshot.toolCalls.reduce(
           (n, tool) => (tool.status === 'running' ? n + 1 : n),
@@ -103,8 +121,16 @@ export const StreamStatusLine = memo(function StreamStatusLine({ active }: Strea
     }
     update()
     const id = setInterval(update, active ? 250 : 800)
-    return () => clearInterval(id)
+    // 「搞定」窗口到点要准时回闲置，不等 800ms 的下一拍。
+    const doneLeft = doneUntilRef.current - Date.now()
+    const doneTimer = doneLeft > 0 ? window.setTimeout(update, doneLeft + 20) : 0
+    return () => {
+      clearInterval(id)
+      window.clearTimeout(doneTimer)
+    }
   }, [active])
+
+  const quip = useStatusQuip(mood, lang)
 
   const parts: string[] = []
   if (stats) {
@@ -113,15 +139,23 @@ export const StreamStatusLine = memo(function StreamStatusLine({ active }: Strea
     if (stats.running > 0) parts.push(`${stats.running} running`)
     if (stats.statusNote) parts.push(stats.statusNote)
   }
+  // 后端的状态一行字优先，墨团别抢话。
+  const showQuip = quip && !stats?.statusNote
 
   return (
     <div
       className={`flex items-center gap-2.5 py-2${active ? ' chat-motion-fade-up' : ' kv-stream-status-idle'}`}
     >
       <StreamStatusLogo mood={mood} paused={loading} />
-      {active && stats && (
+      {(parts.length > 0 || showQuip) && (
         <span className="text-xs tabular-nums text-neutral-500 dark:text-neutral-400">
           {parts.join(' · ')}
+          {showQuip && (
+            <span key={quip} className="kv-blob-quip">
+              {parts.length > 0 ? ' · ' : ''}
+              {quip}
+            </span>
+          )}
         </span>
       )}
     </div>

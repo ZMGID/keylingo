@@ -5,14 +5,17 @@ import {
   BLOB_IDLE_WAKE_MIN_MS,
   BLOB_IDLE_BREATHE_MS,
   BLOB_POKE_RED,
+  BODY_R,
   consumeBlink,
   CX,
+  CY,
   EYE_POINTS,
   KivioBlobSim,
   polyPath,
   queueBlink,
   resolveBlobMood,
 } from './kivioBlobSim'
+import { BODY_POINTS } from './kivioBlobShapes'
 
 describe('kivioBlobSim', () => {
   it('queueBlink 走 70ms 眯 → 150ms 过冲 → 300ms 睁开', () => {
@@ -168,5 +171,123 @@ describe('kivioBlobSim', () => {
     expect(resolveBlobMood({ active: true, runningToolNames: ['read_file'] })).toBe('work')
     expect(resolveBlobMood({ active: true, contentLen: 40, reasoningStreaming: false })).toBe('speak')
     expect(resolveBlobMood({ active: true, contentLen: 40, reasoningStreaming: true })).toBe('think')
+  })
+
+  it('resolveBlobMood：等用户压过工具态，收工窗口只在非活动时生效', () => {
+    expect(resolveBlobMood({ active: true, waiting: true, runningToolNames: ['ask_user'] })).toBe('wait')
+    expect(resolveBlobMood({ active: false, done: true })).toBe('done')
+    expect(resolveBlobMood({ active: false, done: true, error: true })).toBe('error')
+    expect(resolveBlobMood({ active: true, done: true })).toBe('think')
+  })
+
+  it('身体是一条 BODY_POINTS 点的闭合路径，闲置钉在圆上', () => {
+    const sim = new KivioBlobSim({ random: () => 0.5, reducedMotion: true })
+    const paint = sim.sample(0)
+    const nums = [...paint.bodyD.matchAll(/(-?\d+\.\d+)/g)]
+    expect(nums.length).toBe(BODY_POINTS * 2)
+    expect(paint.bodyD.startsWith('M')).toBe(true)
+    expect(paint.bodyD.endsWith('Z')).toBe(true)
+    expect(sim.debug().body).toBe('circle')
+    // 圆：所有点到圆心距离 ≈ BODY_R。
+    for (let i = 0; i < nums.length; i += 2) {
+      const dx = Number(nums[i][1]) - CX
+      const dy = Number(nums[i + 1][1]) - CY
+      expect(Math.hypot(dx, dy)).toBeCloseTo(BODY_R, 0)
+    }
+  })
+
+  it('思考变云、干活变方、说话带尾巴的气泡、出错摊成一滩', () => {
+    const shapeAfter = (mood: 'think' | 'work' | 'speak' | 'error') => {
+      const sim = new KivioBlobSim({ random: () => 0.5 })
+      sim.setMood(mood, 0)
+      for (let t = 0; t <= 1600; t += 16) sim.sample(t)
+      return sim.debug().body
+    }
+    expect(shapeAfter('think')).toBe('cloud')
+    expect(shapeAfter('work')).toBe('squircle')
+    expect(shapeAfter('speak')).toBe('bubble')
+    expect(shapeAfter('error')).toBe('puddle')
+  })
+
+  it('身体变形是渐进的：切心情后一帧不会直接跳成目标形状', () => {
+    const sim = new KivioBlobSim({ random: () => 0.5 })
+    sim.setMood('idle', 0)
+    sim.sample(0)
+    const circle = sim.sample(16).bodyD
+    sim.setMood('work', 32)
+    const mid = sim.sample(48).bodyD
+    let settled = mid
+    for (let t = 64; t <= 2400; t += 16) settled = sim.sample(t).bodyD
+    expect(mid).not.toBe(circle)
+    expect(mid).not.toBe(settled)
+    expect(sim.debug().body).toBe('squircle')
+  })
+
+  it('进入各心情先摆播放列表第 0 张脸；收工是笑脸 + 蹦一下', () => {
+    const face = (mood: 'think' | 'search' | 'error' | 'done' | 'wait') => {
+      const sim = new KivioBlobSim({ random: () => 0.5 })
+      sim.setMood(mood, 0)
+      sim.sample(0)
+      return sim.debug().face
+    }
+    expect(face('think')).toBe('lookUp')
+    expect(face('search')).toBe('wide')
+    expect(face('error')).toBe('dizzy')
+    expect(face('done')).toBe('happy')
+    expect(face('wait')).toBe('wide')
+    const sim = new KivioBlobSim({ random: () => 0.5 })
+    sim.setMood('idle', 0)
+    sim.sample(0)
+    sim.setMood('done', 100)
+    expect(sim.wantsHighFps(100)).toBe(true)
+    const paint = sim.sample(260)
+    expect(paint.rig.startsWith('translate(0.00 0.00)')).toBe(false)
+  })
+
+  it('闭着的脸不眨眼：笑弯的眼皮缩放钉在 1', () => {
+    const sim = new KivioBlobSim({ random: () => 0.5 })
+    sim.setMood('done', 0)
+    for (let t = 0; t <= 600; t += 16) sim.sample(t)
+    expect(sim.debug().face).toBe('happy')
+    expect(sim.debug().blink).toBeCloseTo(1, 2)
+  })
+
+  it('戳一下压扁、戳多了装方、再戳炸毛，过后变回圆', () => {
+    const sim = new KivioBlobSim({ random: () => 0.5 })
+    sim.setMood('idle', 0)
+    sim.sample(0)
+    sim.poke(100)
+    sim.sample(116)
+    expect(sim.debug().body).toBe('puddle')
+    expect(sim.debug().face).toBe('flat')
+    for (let i = 1; i < 4; i++) sim.poke(100 + i * 80)
+    sim.sample(400)
+    expect(sim.debug().body).toBe('squircle')
+    for (let i = 4; i < 7; i++) sim.poke(100 + i * 80)
+    sim.sample(700)
+    expect(sim.debug().body).toBe('burst')
+    expect(sim.debug().face).toBe('dizzy')
+    for (let t = 716; t <= 3200; t += 16) sim.sample(t)
+    expect(sim.debug().body).toBe('circle')
+  })
+
+  it('闲置随机小动作会通知 onAntic（变形态 / 蹦）', () => {
+    // random 钉在 0.97：nextIdleBias 落进「变形态」档，形状取列表末位。
+    const sim = new KivioBlobSim({ random: () => 0.97 })
+    const seen: string[] = []
+    sim.onAntic = (kind) => seen.push(kind)
+    sim.setMood('idle', 0)
+    for (let t = 0; t <= 30000; t += 50) sim.sample(t)
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((k) => k === 'egg' || k === 'hop')).toBe(true)
+    expect(seen).toContain('egg')
+  })
+
+  it('reduced motion 下身体永远是圆、脸不变形', () => {
+    const sim = new KivioBlobSim({ random: () => 0.5, reducedMotion: true })
+    sim.setMood('think', 0)
+    for (let t = 0; t <= 800; t += 16) sim.sample(t)
+    expect(sim.debug().body).toBe('circle')
+    expect(sim.debug().face).toBe('lookUp')
   })
 })

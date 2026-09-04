@@ -3,16 +3,14 @@ import {
   BLOB_BLUE,
   BLOB_EYE,
   BLOB_REST,
-  BODY_R,
-  CX,
-  CY,
   KivioBlobSim,
   blobScheduleMs,
+  type BlobAntic,
   type BlobMood,
 } from './kivioBlobSim'
 import { prefersReducedMotion } from './utils'
 
-export type { BlobMood }
+export type { BlobAntic, BlobMood }
 
 export interface KivioBlobHandle {
   pokeAt: (clientX?: number) => void
@@ -26,6 +24,8 @@ interface KivioBlobProps {
   /** 变化时眨一眼 + 瞟一下（空态换文案）。连点升温不走这条。 */
   pulse?: string | number | null
   onPoke?: (streak: number) => void
+  /** 闲置小动作（变成云 / 方块 / 蛋、蹦一下）：空态标题借此接一句嘴。 */
+  onAntic?: (kind: BlobAntic) => void
 }
 
 function writeAttr(el: Element, name: string, value: string, prev: string): string {
@@ -35,12 +35,12 @@ function writeAttr(el: Element, name: string, value: string, prev: string): stri
 }
 
 export const KivioBlob = memo(forwardRef<KivioBlobHandle, KivioBlobProps>(function KivioBlob(
-  { size = 28, mood = 'idle', paused = false, pulse, onPoke }: KivioBlobProps,
+  { size = 28, mood = 'idle', paused = false, pulse, onPoke, onAntic }: KivioBlobProps,
   ref,
 ) {
   const hostRef = useRef<HTMLSpanElement>(null)
   const rigRef = useRef<SVGGElement>(null)
-  const bodyRef = useRef<SVGCircleElement>(null)
+  const bodyRef = useRef<SVGPathElement>(null)
   const eye0Ref = useRef<SVGPathElement>(null)
   const eye1Ref = useRef<SVGPathElement>(null)
   const simRef = useRef<KivioBlobSim | null>(null)
@@ -48,10 +48,13 @@ export const KivioBlob = memo(forwardRef<KivioBlobHandle, KivioBlobProps>(functi
   const pausedRef = useRef(paused)
   const pulseSkipRef = useRef(true)
   const onPokeRef = useRef(onPoke)
+  const onAnticRef = useRef(onAntic)
   onPokeRef.current = onPoke
+  onAnticRef.current = onAntic
   pausedRef.current = paused
   if (!simRef.current) {
     simRef.current = new KivioBlobSim({ reducedMotion: prefersReducedMotion() })
+    simRef.current.onAntic = (kind) => onAnticRef.current?.(kind)
   }
 
   const pokeAt = (clientX?: number) => {
@@ -98,11 +101,12 @@ export const KivioBlob = memo(forwardRef<KivioBlobHandle, KivioBlobProps>(functi
     const eye1 = eye1Ref.current
     if (!sim || !host || !rig || !body || !eye0 || !eye1) return
 
-    const last = { rig: '', body: '', fill: '', d0: '', t0: '', d1: '', t1: '' }
+    const last = { rig: '', body: '', bodyD: '', fill: '', d0: '', t0: '', d1: '', t1: '' }
     const apply = (now: number) => {
       const p = sim.sample(now)
       last.rig = writeAttr(rig, 'transform', p.rig, last.rig)
       last.body = writeAttr(body, 'transform', p.body, last.body)
+      last.bodyD = writeAttr(body, 'd', p.bodyD, last.bodyD)
       last.fill = writeAttr(body, 'fill', p.fill, last.fill)
       last.d0 = writeAttr(eye0, 'd', p.eyes[0].d, last.d0)
       last.t0 = writeAttr(eye0, 'transform', p.eyes[0].transform, last.t0)
@@ -216,14 +220,7 @@ export const KivioBlob = memo(forwardRef<KivioBlobHandle, KivioBlobProps>(functi
         overflow="visible"
       >
         <g ref={rigRef} transform={BLOB_REST.rig}>
-          <circle
-            ref={bodyRef}
-            cx={CX}
-            cy={CY}
-            r={BODY_R}
-            fill={BLOB_BLUE}
-            transform={BLOB_REST.body}
-          />
+          <path ref={bodyRef} d={BLOB_REST.bodyD} fill={BLOB_BLUE} transform={BLOB_REST.body} />
           <path ref={eye0Ref} fill={BLOB_EYE} d={BLOB_REST.eyes[0].d} transform={BLOB_REST.eyes[0].transform} />
           <path ref={eye1Ref} fill={BLOB_EYE} d={BLOB_REST.eyes[1].d} transform={BLOB_REST.eyes[1].transform} />
         </g>

@@ -6,7 +6,7 @@ import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { useConversationTransition } from './conversationTransitionStore'
 import { InputBar, type InputBarProps } from './InputBar'
 import { KivioBlob, type KivioBlobHandle } from './KivioBlob'
-import { useEmptyHeroJab, useEmptyHeroLine } from './emptyHero'
+import { useEmptyHeroJab, useEmptyHeroLine, useEmptyHeroMutter } from './emptyHero'
 import { TypewriterText } from './TypewriterText'
 import { QueuedMessages } from './QueuedMessages'
 import { IconButton } from '../components/Button'
@@ -46,18 +46,20 @@ function EmptyHeroHeading({
 }) {
   const blobRef = useRef<KivioBlobHandle>(null)
   const { jab, onPoke } = useEmptyHeroJab(lang)
+  const { mutter, onAntic } = useEmptyHeroMutter(lang)
   const greeting = useEmptyHeroLine({
     lang,
     assistantName,
     projectName,
     setName,
     seed,
-    active: active && !jab,
+    active: active && !jab && !mutter,
   })
-  const text = jab ?? greeting
+  // 被戳的吐槽 > 自己发呆的嘟囔 > 问候。
+  const text = jab ?? mutter ?? greeting
   return (
     <div className="chat-motion-fade-up chat-empty-hero-heading">
-      <KivioBlob ref={blobRef} size={56} mood="idle" pulse={greeting} onPoke={onPoke} />
+      <KivioBlob ref={blobRef} size={56} mood="idle" pulse={greeting} onPoke={onPoke} onAntic={onAntic} />
       <h2
         className="chat-empty-hero-title cursor-pointer select-none"
         onPointerDown={(event) => {
