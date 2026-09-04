@@ -14,7 +14,7 @@ import { useMultiAnswerViewMode } from './multiAnswerViewMode'
 //
 // 两种展示模式（全局偏好 useMultiAnswerViewMode，默认 'tabs'）：
 //  - 'tabs'（切换）：一次只整宽显示**当前选中条**（默认第一条），组末尾 footer 切换显示哪条。
-//  - 'columns'（并排）：N 列横向并排（原有实现，视觉/性能完全不变）。
+//  - 'columns'（并排）：N 列横向并排；整组铺满主区，单列封顶与单对话阅读宽（max-w-4xl）一致。
 // 组末尾 footer：视图切换控件 + 一排模型 chip（点 chip = 切显示条 +「续聊选中条」一举两用）。
 //
 // 性能降级（步骤 8 / R10）：N 列同时全量渲染 reasoning + markdown 是内存/CPU 大头。
@@ -116,7 +116,7 @@ function GroupColumnView({
 }) {
   const { message, streaming } = column
   const wrapperClass = showColumnChrome
-    ? `chat-message-group-col flex max-h-[min(560px,70vh)] min-w-[280px] max-w-[420px] flex-1 flex-col rounded-2xl border px-3 py-2 ${
+    ? `chat-message-group-col flex max-h-[min(560px,70vh)] min-w-[280px] max-w-4xl flex-1 flex-col rounded-2xl border px-3 py-2 ${
         isSelected
           ? 'border-emerald-400/70 bg-emerald-50/40 dark:border-emerald-500/50 dark:bg-emerald-950/20'
           : 'border-neutral-200/70 bg-neutral-50/40 dark:border-neutral-700/60 dark:bg-neutral-900/30'
@@ -335,21 +335,63 @@ function MessageGroupBase({
   // footer 高亮的那条：tabs 看正显示的；columns 看续聊选中条（流式态无选中 → 不高亮）。
   const footerActiveId = viewMode === 'tabs' ? tabColumn.message.id : (live ? null : effectiveSelectedId)
 
+  const footer = (
+    <GroupFooter
+      columns={columns}
+      viewMode={viewMode}
+      onChangeViewMode={setViewMode}
+      activeMessageId={footerActiveId}
+      markContext={!live}
+      onSelectChip={handleChipClick}
+    />
+  )
+
   return (
-    <div className="chat-message-group-wrap flex w-full flex-col py-2">
-      {viewMode === 'columns' ? (
-        <div className="chat-message-group custom-scrollbar flex w-full gap-3 overflow-x-auto pb-1">
-          {columns.map((column, index) => (
+    <div className="chat-message-group-wrap py-2">
+      <div className={viewMode === 'columns' ? 'chat-message-group-wide' : 'chat-message-rail'}>
+        <div
+          className={viewMode === 'columns' ? 'chat-message-group-stack' : 'contents'}
+          style={
+            viewMode === 'columns'
+              ? { ['--chat-message-group-cols' as string]: String(columns.length) }
+              : undefined
+          }
+        >
+          {viewMode === 'columns' ? (
+            <div className="chat-message-group custom-scrollbar flex w-full gap-3 overflow-x-auto pb-1">
+              {columns.map((column, index) => (
+                <GroupColumnView
+                  key={column.message.id}
+                  column={column}
+                  conversationId={conversationId}
+                  live={live}
+                  isSelected={!live && column.message.id === effectiveSelectedId}
+                  isFocused={index === focusedIndex}
+                  showColumnChrome
+                  groupId={groupId}
+                  onMouseEnter={() => setFocusedIndex(index)}
+                  onSelectColumn={onSelectColumn}
+                  onUpdateMessage={onUpdateMessage}
+                  onRegenerateMessage={onRegenerateMessage}
+                  onReplyWithModel={onReplyWithModel}
+                  replyOccupiedModels={replyOccupiedModels}
+                  onForkMessage={onForkMessage}
+                  onDeleteMessage={onDeleteMessage}
+                  onSaveMessageToNote={onSaveMessageToNote}
+                />
+              ))}
+            </div>
+          ) : (
             <GroupColumnView
-              key={column.message.id}
-              column={column}
+              key={tabColumn.message.id}
+              column={tabColumn}
               conversationId={conversationId}
               live={live}
-              isSelected={!live && column.message.id === effectiveSelectedId}
-              isFocused={index === focusedIndex}
-              showColumnChrome
+              isSelected={false}
+              // tabs 当前显示列即聚焦列（正常展示流式思考）。
+              isFocused
+              showColumnChrome={false}
               groupId={groupId}
-              onMouseEnter={() => setFocusedIndex(index)}
               onSelectColumn={onSelectColumn}
               onUpdateMessage={onUpdateMessage}
               onRegenerateMessage={onRegenerateMessage}
@@ -359,37 +401,10 @@ function MessageGroupBase({
               onDeleteMessage={onDeleteMessage}
               onSaveMessageToNote={onSaveMessageToNote}
             />
-          ))}
+          )}
+          {footer}
         </div>
-      ) : (
-        <GroupColumnView
-          key={tabColumn.message.id}
-          column={tabColumn}
-          conversationId={conversationId}
-          live={live}
-          isSelected={false}
-          // tabs 当前显示列即聚焦列（正常展示流式思考）。
-          isFocused
-          showColumnChrome={false}
-          groupId={groupId}
-          onSelectColumn={onSelectColumn}
-          onUpdateMessage={onUpdateMessage}
-          onRegenerateMessage={onRegenerateMessage}
-          onReplyWithModel={onReplyWithModel}
-          replyOccupiedModels={replyOccupiedModels}
-          onForkMessage={onForkMessage}
-          onDeleteMessage={onDeleteMessage}
-          onSaveMessageToNote={onSaveMessageToNote}
-        />
-      )}
-      <GroupFooter
-        columns={columns}
-        viewMode={viewMode}
-        onChangeViewMode={setViewMode}
-        activeMessageId={footerActiveId}
-        markContext={!live}
-        onSelectChip={handleChipClick}
-      />
+      </div>
     </div>
   )
 }
