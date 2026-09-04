@@ -578,7 +578,9 @@ impl OpenAiChatProvider<'_> {
         //
         // 两套 wire：
         // - DeepSeek / Kimi 官方：Chat Completions 用 `thinking.type=disabled` 做开关
-        //   （其 reasoning_effort 只认 low/high/max，没有 none）。
+        //   （其 reasoning_effort 只认 low/high/max，没有 none）。开思考也显式
+        //   `enabled`：官方样例都带；省略目前靠默认 enabled，默认一旦改掉就会
+        //   和 GPT 没要 summary 一样空等无思维链。
         // - 其余 OpenAI 兼容端（含代理 / OpenAI 自家）：`reasoning_effort: "none"`。
         if !request.options.thinking_enabled {
             if utils::provider_supports_thinking_field(&self.provider.base_url) {
@@ -586,6 +588,8 @@ impl OpenAiChatProvider<'_> {
             } else {
                 body["reasoning_effort"] = Value::String("none".to_string());
             }
+        } else if utils::provider_supports_thinking_field(&self.provider.base_url) {
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
         }
         // 思考等级 → OpenAI Chat `reasoning_effort`，原样下发（档位由模型库 reasoningEfforts 门控）。
         // 代理普遍接受;不发 Qwen/vLLM 私有的 enable_thinking / chat_template_kwargs。
@@ -1453,6 +1457,23 @@ mod tests {
         let kimi = build_openai_body_with(None, false, "https://api.moonshot.cn/v1");
         assert_eq!(kimi["thinking"]["type"], "disabled", "body: {kimi}");
         assert!(kimi.get("reasoning_effort").is_none(), "body: {kimi}");
+    }
+
+    #[test]
+    fn thinking_on_sends_thinking_enabled_on_deepseek_and_kimi() {
+        let ds = build_openai_body(Some("high"), "https://api.deepseek.com/v1");
+        assert_eq!(ds["thinking"]["type"], "enabled", "body: {ds}");
+        assert_eq!(ds["reasoning_effort"], "high", "body: {ds}");
+
+        let kimi = build_openai_body(Some("high"), "https://api.moonshot.cn/v1");
+        assert_eq!(kimi["thinking"]["type"], "enabled", "body: {kimi}");
+        assert_eq!(kimi["reasoning_effort"], "high", "body: {kimi}");
+
+        let openai = build_openai_body(Some("high"), "https://api.openai.com/v1");
+        assert!(
+            openai.get("thinking").is_none(),
+            "OpenAI Chat 不该发 thinking 对象: {openai}"
+        );
     }
 
     #[test]

@@ -1309,6 +1309,10 @@ mod tests {
             med["generationConfig"]["thinkingConfig"]["thinkingLevel"], "medium",
             "body: {med}"
         );
+        assert_eq!(
+            med["generationConfig"]["thinkingConfig"]["includeThoughts"], true,
+            "3.x 也必须 opt-in 思考摘要: {med}"
+        );
         // 档位原样下发，适配器不再做协议级收敛：Gemini 的 thinkingLevel 只有 low/medium/high，
         // 传 max 就吃 400 —— 该不该出现 max 由模型库 `reasoningEfforts` 门控（Gemini 条目均无
         // 此字段，走 low/medium/high 兜底，故实际取不到 max）。
