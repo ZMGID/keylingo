@@ -398,6 +398,9 @@ fn parse_request(arguments: &Value) -> Result<ImageGenerationRequest, String> {
 }
 
 fn validate_provider(provider: &ModelProvider) -> Result<(), String> {
+    if provider.request.oauth.is_some() {
+        return Err("Account OAuth currently supports chat and vision input; choose an API Key provider for image generation".into());
+    }
     match provider.api_format_kind() {
         // Gemini 原生走 generateContent 出图路径；OpenAI 系走 images/chat 路径。
         // xAI 出图走 `/images/generations`（`uses_xai_images_api`），与 OpenAI 系同路。
@@ -409,7 +412,7 @@ fn validate_provider(provider: &ModelProvider) -> Result<(), String> {
             return Err("Mixer image generation requires an OpenAI-compatible provider".to_string())
         }
     }
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         return Err(format!(
             "Image generation provider `{}` has no API key configured",
             provider.name

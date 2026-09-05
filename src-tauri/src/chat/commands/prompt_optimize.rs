@@ -180,7 +180,7 @@ async fn optimize_prompt_with_model(
             "No usable model. Configure one in Mixer or Models first.",
         ));
     };
-    if provider.api_keys.is_empty() || model.trim().is_empty() {
+    if !provider.has_credentials() || model.trim().is_empty() {
         return Err(localize(
             &language,
             "当前模型没有 API Key，请先在设置里填写",

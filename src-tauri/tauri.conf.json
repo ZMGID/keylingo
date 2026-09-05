@@ -39,7 +39,8 @@
       "binaries/kivio-ocr-helper"
     ],
     "resources": {
-      "resources/skills": "skills"
+      "resources/skills": "skills",
+      "../docs/licenses": "licenses"
     },
     "windows": {
       "wix": {

@@ -155,7 +155,7 @@ pub(super) async fn complete_assistant_reply_inner(
         .get_provider(&resolved_provider_id)
         .ok_or_else(|| "Chat provider not found".to_string())?
         .clone();
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         return Err(format_chat_missing_api_key_error(&provider.name));
     }
     if resolved_model.trim().is_empty() {

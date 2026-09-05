@@ -641,7 +641,7 @@ fn resolve_sub_agent_provider_model(
     if !ov_provider_id.is_empty() && !ov_model.is_empty() {
         if let Some(p) = settings
             .get_provider(ov_provider_id)
-            .filter(|p| p.enabled && !p.api_keys.is_empty())
+            .filter(|p| p.enabled && p.has_credentials())
         {
             return Ok((p.clone(), ov_model.to_string()));
         }
@@ -1078,7 +1078,7 @@ pub fn handle_agent_spawn<'a>(
             &parent_conversation.model,
             def.model.as_deref(),
         )?;
-        if provider.api_keys.is_empty() {
+        if !provider.has_credentials() {
             return Ok(err_result(
                 "Sub-agent provider has no API key configured.".to_string(),
             ));

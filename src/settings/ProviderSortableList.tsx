@@ -1,3 +1,4 @@
+import { providerHasCredentials } from '../api/tauri'
 import { useMemo, useRef } from 'react'
 import { GripHorizontal } from 'lucide-react'
 import type { ModelProvider } from '../api/tauri'
@@ -39,7 +40,7 @@ export function ProviderSortableList({
   return (
     <div ref={listRef} className={`kv-provider-list-items custom-scrollbar${draggingId ? ' is-sorting' : ''}`}>
       {providers.map((provider, index) => {
-        const configured = provider.apiKeys.some((key) => key.trim())
+        const configured = providerHasCredentials(provider)
         const isDragging = draggingId === provider.id
         const transform = itemTransform(index)
 

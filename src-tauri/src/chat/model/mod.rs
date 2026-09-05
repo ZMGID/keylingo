@@ -52,6 +52,8 @@ pub(crate) async fn generate_with_chat_provider(
     retry_attempts: usize,
     request: GenerateRequest,
 ) -> Result<GenerateOutput, ModelError> {
+    let resolved = crate::provider_oauth::resolve_provider(state, provider).await.map_err(ModelError::new)?;
+    let provider = &resolved;
     use crate::settings::ProviderApiFormat;
     match official_deepseek_builtin_hop(provider, request.options.builtin_web_search) {
         Some(OfficialDeepseekBuiltinHop::Responses) => {
@@ -100,6 +102,8 @@ pub(crate) async fn stream_with_chat_provider(
     request: GenerateRequest,
     sink: &mut (dyn StreamSink + Send),
 ) -> Result<GenerateOutput, ModelError> {
+    let resolved = crate::provider_oauth::resolve_provider(state, provider).await.map_err(ModelError::new)?;
+    let provider = &resolved;
     use crate::settings::ProviderApiFormat;
     match official_deepseek_builtin_hop(provider, request.options.builtin_web_search) {
         Some(OfficialDeepseekBuiltinHop::Responses) => {

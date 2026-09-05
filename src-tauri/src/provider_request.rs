@@ -155,6 +155,9 @@ pub fn header_pairs(
         // 应该是用户填的那个样子）。
         upsert_pair(&mut pairs, header.key.clone(), header.value.clone());
     }
+    for (name, value) in crate::provider_oauth::header_pairs(provider) {
+        upsert_pair(&mut pairs, name, value);
+    }
     pairs
 }
 

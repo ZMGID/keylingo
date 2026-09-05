@@ -45,6 +45,9 @@ pub struct ProviderCustomHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderRequestConfig {
+    /// OAuth metadata only; secrets live in the operating system credential store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<crate::provider_oauth::OAuthConfig>,
     /// 附加到该供应商所有请求上的自定义头。同名时覆盖 CLI 身份预设。
     pub custom_headers: Vec<ProviderCustomHeader>,
     /// 是否跟随系统代理。默认 true —— 与加这个开关之前的行为一致；关掉才走直连。
@@ -66,6 +69,7 @@ pub struct ProviderRequestConfig {
 impl Default for ProviderRequestConfig {
     fn default() -> Self {
         Self {
+            oauth: None,
             custom_headers: Vec::new(),
             use_system_proxy: true,
             prompt_caching: None,
@@ -166,6 +170,13 @@ impl ProviderApiFormat {
 }
 
 impl ModelProvider {
+    pub fn has_credentials(&self) -> bool {
+        if let Some(auth) = &self.request.oauth {
+            return auth.credential_id.is_some();
+        }
+        self.api_keys.iter().any(|key| !key.trim().is_empty())
+    }
+
     pub fn api_format_kind(&self) -> ProviderApiFormat {
         ProviderApiFormat::from_raw(&self.api_format)
     }
@@ -2791,7 +2802,7 @@ fn onboarding_status_is_set(raw: &str) -> bool {
 
 fn provider_has_usable_config(provider: &ModelProvider) -> bool {
     provider.enabled
-        && provider.api_keys.iter().any(|k| !k.trim().is_empty())
+        && provider.has_credentials()
         && !provider.enabled_models.is_empty()
 }
 
