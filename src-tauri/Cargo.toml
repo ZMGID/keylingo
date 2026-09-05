@@ -62,7 +62,7 @@ rmcp = { version = "3.0.1", default-features = false, features = [
 
 # HTTP 客户端与异步运行时
 reqwest = { version = "0.13", features = ["json", "rustls", "multipart", "form"] }
-tokio = { version = "1", features = ["time", "process", "io-util", "sync", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["time", "process", "io-util", "net", "sync", "rt-multi-thread", "macros"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 scraper = "0.23"
 html-escape = "0.2"
@@ -85,6 +85,7 @@ unicode-normalization = "0.1"
 # 工具库
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 # 连接器 OAuth（PKCE + DCR + loopback）：sha2 算 code_challenge，rand 生成 code_verifier，
 # url 构造/解析 authorize URL 与回调 query。
 sha2 = "0.10"

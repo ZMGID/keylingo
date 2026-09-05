@@ -1744,7 +1744,7 @@ async fn compact_conversation_inner(
         .get_provider(&provider_id)
         .ok_or_else(|| "Compression provider not found".to_string())?
         .clone();
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         return Err(format_chat_missing_api_key_error(&provider.name));
     }
     if model.trim().is_empty() {

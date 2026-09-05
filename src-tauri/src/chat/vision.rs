@@ -197,7 +197,7 @@ pub(super) async fn analyze_chat_images_with_auxiliary_model(
         .get_provider(&auxiliary_model.provider_id)
         .ok_or_else(|| "Vision auxiliary provider not found".to_string())?
         .clone();
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         return Err(format_chat_missing_api_key_error(&provider.name));
     }
     if auxiliary_model.model.trim().is_empty() {

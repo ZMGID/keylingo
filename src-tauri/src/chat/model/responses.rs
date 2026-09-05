@@ -584,6 +584,9 @@ impl OpenAiResponsesProvider<'_> {
                 body[key] = value.clone();
             }
         }
+        if crate::provider_oauth::is_codex(self.provider) {
+            crate::provider_oauth::codex_body(&mut body);
+        }
         body
     }
 

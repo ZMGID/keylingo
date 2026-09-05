@@ -85,7 +85,7 @@ async fn generate_title_with_model(
         eprintln!("[title] provider 未找到: {provider_id}");
         return None;
     };
-    if provider.api_keys.is_empty() || model.trim().is_empty() {
+    if !provider.has_credentials() || model.trim().is_empty() {
         eprintln!("[title] provider 无 key 或 model 为空: {provider_id} / {model}");
         return None;
     }

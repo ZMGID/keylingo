@@ -1479,7 +1479,7 @@ pub(crate) async fn lens_translate(
             return Ok(serde_json::json!({ "success": false, "error": "OCR provider not found" }))
         }
     };
-    if ocr_provider.api_keys.is_empty() {
+    if !ocr_provider.has_credentials() {
         return Ok(serde_json::json!({ "success": false, "error": "Missing API Key" }));
     }
     if settings.screenshot_translation.model.trim().is_empty() {
@@ -1727,7 +1727,7 @@ pub(crate) async fn lens_translate_text(
             return Ok(serde_json::json!({ "success": false, "error": msg }));
         }
     };
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         let msg = "Missing API Key".to_string();
         emit_done(false, Some(&msg));
         return Ok(serde_json::json!({ "success": false, "error": msg }));
@@ -2056,7 +2056,7 @@ pub(crate) async fn lens_replace_translate(
         Some(p) => p.clone(),
         None => return fail("Translation provider not found"),
     };
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         return fail("Missing API Key");
     }
     if settings.screenshot_translation.model.trim().is_empty() {

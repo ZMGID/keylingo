@@ -1201,6 +1201,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       enabledModels: [],
       enabled: true,
       apiFormat: preset.apiFormat ?? 'openai_chat',
+      request: preset.oauth ? { oauth: { provider: preset.oauth } } : undefined,
     }
     setSettings({
       ...settings,
@@ -1419,6 +1420,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       }
     } catch (err) {
       console.error('Failed to fetch models:', err)
+      setSaveError(`${lang === 'zh' ? '获取模型失败：' : 'Could not fetch models: '}${String(err)}`)
     } finally {
       setFetchingProviderId(null)
     }

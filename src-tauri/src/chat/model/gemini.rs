@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING};
 use serde_json::Value;
 
 use crate::api::{send_with_failover, with_chat_request_timeout};
+use crate::provider_oauth::antigravity;
 use crate::settings::ModelProvider;
 use crate::state::AppState;
 use crate::usage::{
@@ -24,6 +25,13 @@ pub struct GeminiProvider<'a> {
     state: &'a AppState,
     provider: &'a ModelProvider,
     retry_attempts: usize,
+}
+
+struct DiscardSink;
+impl StreamSink for DiscardSink {
+    fn emit(&mut self, _part: StreamPart) -> Result<(), ModelError> {
+        Ok(())
+    }
 }
 
 impl<'a> GeminiProvider<'a> {
@@ -52,6 +60,9 @@ impl LanguageModelProvider for GeminiProvider<'_> {
 
 impl GeminiProvider<'_> {
     async fn generate_inner(&self, request: GenerateRequest) -> Result<GenerateOutput, ModelError> {
+        if antigravity::is_provider(self.provider) {
+            return self.stream_inner(request, &mut DiscardSink).await;
+        }
         let label = request_label(&request, "Gemini generateContent");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
@@ -69,7 +80,7 @@ impl GeminiProvider<'_> {
                         self.state
                             .client_for(self.provider)
                             .post(&url)
-                            .headers(gemini_headers(key).unwrap_or_default())
+                            .headers(self.auth_headers(key))
                             .header(ACCEPT_ENCODING, "identity"),
                         self.provider,
                         request.metadata.conversation_id.as_deref(),
@@ -142,6 +153,9 @@ impl GeminiProvider<'_> {
         request: GenerateRequest,
         sink: &mut (dyn StreamSink + Send),
     ) -> Result<GenerateOutput, ModelError> {
+        if antigravity::is_provider(self.provider) && request.options.builtin_web_search {
+            return Err(ModelError::new("Antigravity does not support built-in Google Search here. Turn off native search or use agent web-search tools."));
+        }
         let label = request_label(&request, "Gemini stream");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
@@ -161,7 +175,7 @@ impl GeminiProvider<'_> {
                         self.state
                             .client_for(self.provider)
                             .post(&url)
-                            .headers(gemini_headers(key).unwrap_or_default())
+                            .headers(self.auth_headers(key))
                             .header(ACCEPT_ENCODING, "identity"),
                         self.provider,
                         request.metadata.conversation_id.as_deref(),
@@ -188,6 +202,7 @@ impl GeminiProvider<'_> {
         let mut carry_sig: Option<String> = None;
         let mut finish_reason = "stop".to_string();
         let mut usage: Option<ModelUsage> = None;
+        let mut saw_terminal = false;
         // 内置搜索引用：groundingMetadata 通常在末段 chunk，逐段合并兜底。
         let mut web_search: Option<BuiltinWebSearch> = None;
         // 模型生成的图片：逐 chunk 的 inlineData part 累积，finish 后并入 output。
@@ -229,9 +244,12 @@ impl GeminiProvider<'_> {
                 if data.is_empty() {
                     continue;
                 }
-                let Ok(value) = serde_json::from_str::<Value>(data) else {
+                let Ok(mut value) = serde_json::from_str::<Value>(data) else {
                     continue;
                 };
+                if antigravity::is_provider(self.provider) {
+                    value = antigravity::unwrap_response(value);
+                }
                 if let Some(err) = gemini_error_message(&value) {
                     if super::is_missing_stream_terminal_error(&err)
                         && (!full.trim().is_empty()
@@ -284,6 +302,7 @@ impl GeminiProvider<'_> {
                     }
                 }
                 if let Some(reason) = gemini_finish_reason_str(&value) {
+                    saw_terminal = true;
                     finish_reason = reason;
                 }
                 if let Some(next_usage) = gemini_usage(&value) {
@@ -304,6 +323,13 @@ impl GeminiProvider<'_> {
             }
         }
 
+        if antigravity::is_provider(self.provider) && !saw_terminal {
+            let error =
+                "Antigravity stream ended before a finish reason was received; retry the request";
+            self.record_usage_failure(&request, &label, started_at, started.elapsed(), error);
+            self.record_debug_failure(&request, &label, true, error, started_at, started.elapsed());
+            return Err(ModelError::new(error));
+        }
         // 有工具调用则结束原因归一为 tool_calls（Gemini 常仍返回 STOP）。
         let finish_reason = normalize_finish_reason(&finish_reason, !tool_calls.is_empty());
         sink.emit(StreamPart::Finish {
@@ -333,13 +359,27 @@ impl GeminiProvider<'_> {
     }
 
     fn endpoint_url(&self, model: &str, stream: bool) -> String {
+        if antigravity::is_provider(self.provider) {
+            return format!(
+                "{}/v1internal:streamGenerateContent?alt=sse",
+                antigravity::BASE
+            );
+        }
         gemini_url(&self.provider.base_url, model, stream)
+    }
+
+    fn auth_headers(&self, key: &str) -> HeaderMap {
+        if antigravity::is_provider(self.provider) {
+            HeaderMap::new()
+        } else {
+            gemini_headers(key).unwrap_or_default()
+        }
     }
 
     fn request_body(&self, request: &GenerateRequest, _stream: bool) -> Value {
         // 注意：Gemini 的 model/method/stream 都在 URL 上，不在 body 里。
         let mut body = serde_json::json!({
-            "contents": gemini_contents_from_generate_request(request),
+            "contents": contents_with_tool_ids(request, antigravity::is_provider(self.provider) && (request.model.starts_with("claude-") || request.model.starts_with("gpt-oss-"))),
             "generationConfig": {},
         });
         if request.options.max_tokens > 0 {
@@ -394,7 +434,11 @@ impl GeminiProvider<'_> {
                 body[key] = value.clone();
             }
         }
-        body
+        if antigravity::is_provider(self.provider) {
+            antigravity::wrap_request(self.provider, &request.model, body)
+        } else {
+            body
+        }
     }
 
     /// 重建本次请求实际会带的 headers（脱敏后）供请求调试面板展示。
@@ -404,7 +448,9 @@ impl GeminiProvider<'_> {
     ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
         if let Some(key) = self.provider.preferred_api_key() {
-            headers.insert("x-goog-api-key".to_string(), key.to_string());
+            if !antigravity::is_provider(self.provider) {
+                headers.insert("x-goog-api-key".to_string(), key.to_string());
+            }
         }
         headers.insert("content-type".to_string(), "application/json".to_string());
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
@@ -603,6 +649,10 @@ fn gemini_supports_thinking_level(model: &str) -> bool {
 /// canonical messages → Gemini `contents[]`。Tool 结果按函数名关联（Gemini 无 call id），
 /// 先扫 assistant 的 functionCall 建 `tool_call_id → name` 映射。
 pub fn gemini_contents_from_generate_request(request: &GenerateRequest) -> Vec<Value> {
+    contents_with_tool_ids(request, false)
+}
+
+fn contents_with_tool_ids(request: &GenerateRequest, include_ids: bool) -> Vec<Value> {
     let id_to_name = tool_call_id_to_name(&request.messages);
     let mut contents: Vec<Value> = Vec::new();
     for message in &request.messages {
@@ -611,7 +661,7 @@ pub fn gemini_contents_from_generate_request(request: &GenerateRequest) -> Vec<V
             // Gemini contents 只有 user/model；Tool 结果作为 user 载体。
             ModelRole::User | ModelRole::Tool => "user",
         };
-        let parts = gemini_parts_from_message(message, &id_to_name);
+        let parts = gemini_parts_from_message(message, &id_to_name, include_ids);
         if parts.is_empty() {
             continue;
         }
@@ -638,6 +688,7 @@ fn tool_call_id_to_name(messages: &[ModelMessage]) -> std::collections::HashMap<
 fn gemini_parts_from_message(
     message: &ModelMessage,
     id_to_name: &std::collections::HashMap<String, String>,
+    include_ids: bool,
 ) -> Vec<Value> {
     let mut parts = Vec::new();
     for part in &message.content {
@@ -668,6 +719,7 @@ fn gemini_parts_from_message(
                 }
             }
             MessagePart::ToolCall {
+                id,
                 name,
                 arguments,
                 arguments_raw,
@@ -683,6 +735,9 @@ fn gemini_parts_from_message(
                     let mut part = serde_json::json!({
                         "functionCall": { "name": name, "args": args }
                     });
+                    if include_ids {
+                        part["functionCall"]["id"] = Value::String(id.clone());
+                    }
                     // Gemini 3.x：回放 functionCall 必须带回响应给的 thoughtSignature，否则 400。
                     if let Some(sig) = signature {
                         part["thoughtSignature"] = Value::String(sig.clone());
@@ -705,9 +760,13 @@ fn gemini_parts_from_message(
                     .ok()
                     .filter(|v| v.is_object())
                     .unwrap_or_else(|| serde_json::json!({ "output": content }));
-                parts.push(serde_json::json!({
+                let mut part = serde_json::json!({
                     "functionResponse": { "name": name, "response": response }
-                }));
+                });
+                if include_ids {
+                    part["functionResponse"]["id"] = Value::String(tool_call_id.clone());
+                }
+                parts.push(part);
             }
             MessagePart::Reasoning { .. } => {
                 // 思维文本回放时丢弃（thoughtSignature 未保存；对连续性影响可接受）。
@@ -1056,7 +1115,12 @@ fn gemini_tool_call_from_part(part: &Value) -> Option<PendingToolCall> {
     let arguments_raw = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
     let (arguments, arguments_parse_error) = parse_tool_arguments(&arguments_raw);
     Some(PendingToolCall {
-        id: format!("call_{}", uuid::Uuid::new_v4()),
+        id: call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4())),
         function_name: name,
         arguments,
         arguments_raw,
@@ -1280,6 +1344,57 @@ mod tests {
         );
         let p = provider();
         GeminiProvider::new(&state, &p, 1).request_body(request, stream)
+    }
+
+    #[test]
+    fn antigravity_adapter_envelope_headers_and_response() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let mut p = provider();
+        p.base_url = antigravity::BASE.into();
+        p.request.oauth = Some(crate::provider_oauth::OAuthConfig {
+            provider: "antigravity".into(),
+            credential_id: Some("ref".into()),
+            project_id: Some("account-project".into()),
+        });
+        crate::provider_oauth::validate_provider(&p).unwrap();
+        let adapter = GeminiProvider::new(&state, &p, 1);
+        let request = GenerateRequest {
+            model: "claude-test-thinking".into(),
+            system: "System prompt".into(),
+            messages: vec![ModelMessage::text(ModelRole::User, "Hello")],
+            tools: vec![],
+            options: Default::default(),
+            metadata: Default::default(),
+        };
+        let body = adapter.request_body(&request, true);
+        assert_eq!(body["project"], "account-project");
+        assert_eq!(body["model"], "claude-test-thinking");
+        assert_eq!(
+            body["request"]["systemInstruction"]["parts"][0]["text"],
+            "System prompt"
+        );
+        assert!(body["request"]["generationConfig"]
+            .get("thinkingConfig")
+            .is_none());
+        assert!(adapter
+            .endpoint_url(&request.model, false)
+            .ends_with("/v1internal:streamGenerateContent?alt=sse"));
+        assert!(!adapter.auth_headers("token").contains_key("x-goog-api-key"));
+        assert!(crate::provider_request::header_pairs(&p, None)
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer AIza-test"));
+        let value = antigravity::unwrap_response(serde_json::json!({"response":{
+            "candidates":[{"content":{"parts":[{"text":"Hello"},{"functionCall":{"id":"server-call","name":"glob","args":{}},"thoughtSignature":"signature"}]},"finishReason":"STOP"}],
+            "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}
+        }}));
+        let output = output_from_gemini_response(&value, "Antigravity fixture").unwrap();
+        assert_eq!(output.tool_calls[0].id, "server-call");
+        assert_eq!(output.tool_calls[0].signature.as_deref(), Some("signature"));
+        p.base_url = "https://example.com".into();
+        assert!(crate::provider_oauth::validate_provider(&p).is_err());
     }
 
     #[test]
@@ -1664,6 +1779,19 @@ mod tests {
         let fr = &contents[1]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "glob");
         assert_eq!(fr["response"]["output"], "found 5 files");
+        let antigravity_contents = contents_with_tool_ids(&request, true);
+        assert_eq!(
+            antigravity_contents[0]["parts"][0]["functionCall"]["id"],
+            "call_abc"
+        );
+        assert_eq!(
+            antigravity_contents[1]["parts"][0]["functionResponse"]["id"],
+            "call_abc"
+        );
+        assert_eq!(
+            antigravity_contents[0]["parts"][0]["thoughtSignature"],
+            "SIG123"
+        );
     }
 
     #[test]
