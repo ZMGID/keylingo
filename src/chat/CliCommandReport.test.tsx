@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { CliCommandReport, normalizeLegacyCliReport, parseCliReport, parseQuotas } from './CliCommandReport'
+import { CliCommandReport } from './CliCommandReport'
+import { normalizeLegacyCliReport, parseCliReport, parseQuotas } from './cliCommandReportData'
 import { ChatMarkdown } from './ChatMarkdown'
 
 const output = 'Gemini Models\tWeekly Limit Remaining\t89%\t2026-09-11T15:23:59Z\nGemini Models\tFive Hour Limit Remaining\t0%\t2026-09-05T10:39:37Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-09-12T07:09:02Z'

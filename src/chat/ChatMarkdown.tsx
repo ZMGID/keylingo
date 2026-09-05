@@ -25,7 +25,8 @@ import { useConversationTransition } from './conversationTransitionStore'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
-import { CliCommandReport, normalizeLegacyCliReport, parseCliReport } from './CliCommandReport'
+import { CliCommandReport } from './CliCommandReport'
+import { normalizeLegacyCliReport, parseCliReport } from './cliCommandReportData'
 
 interface ChatMarkdownProps {
   content: string
