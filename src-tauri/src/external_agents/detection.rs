@@ -191,6 +191,7 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             }
         }
         Err(err) => {
+            eprintln!("[external-agent] {} model probe failed: {err}", def.id);
             let models = fallback_models_from_pairs(def.fallback_models);
             // codex fallback：给每个真实模型挂上静态 effort，前端换模型时仍有档位可选。
             let reasoning_by_model = if def.id == "codex" {
@@ -1224,6 +1225,7 @@ async fn probe_models(
             .args(args)
             .current_dir(cwd)
             .no_console_window()
+            .kill_on_drop(true)
             .output(),
     )
     .await
