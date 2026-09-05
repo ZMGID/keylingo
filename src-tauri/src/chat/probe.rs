@@ -36,6 +36,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(700);
 pub(crate) struct ProbeRequest {
     #[serde(default)]
     pub(crate) id: Option<String>,
+    /// Read-only model probe through the same command used by the model picker.
+    /// Writes models-result.json instead of creating a chat turn.
+    #[serde(default)]
+    pub(crate) probe_models: bool,
     pub(crate) prompt: String,
     #[serde(default)]
     pub(crate) provider: Option<String>,
@@ -259,6 +263,26 @@ pub async fn run_probe_watcher(app: AppHandle) {
             }
         };
 
+        if req.probe_models {
+            let result = crate::external_agents::commands::chat_detect_external_agent_models(
+                app.clone(),
+                app.state::<AppState>(),
+                req.external_agent_id.clone().unwrap_or_default(),
+                req.conversation_id.clone(),
+                Some(true),
+            )
+            .await;
+            let value = match result {
+                Ok(payload) => serde_json::json!({"id":req.id,"payload":payload}),
+                Err(error) => serde_json::json!({"id":req.id,"error":error}),
+            };
+            let _ = crate::chat::storage::atomic_write(
+                &dir.join("models-result.json"),
+                &value.to_string(),
+                "model probe",
+            );
+            continue;
+        }
         eprintln!("[chat-probe] running: {:?}", req.prompt);
         let result = handle_probe_request(&app, req).await;
         write_result(&dir, &result);
@@ -500,19 +524,21 @@ mod tests {
         // 新探点的缺省必须是「什么都不做」：取消不触发，上下文状态不额外计算。
         assert!(req.cancel_after_ms.is_none());
         assert!(!req.compute_context_stats);
+        assert!(!req.probe_models);
         assert!(req.external_model.is_none() && req.external_sandbox.is_none());
     }
 
     #[test]
     fn probe_request_parses_the_new_probes() {
         let req: ProbeRequest = serde_json::from_str(
-            r#"{"prompt":"hi","cancelAfterMs":1500,"computeContextStats":true,
+            r#"{"prompt":"hi","cancelAfterMs":1500,"computeContextStats":true,"probeModels":true,
                 "externalAgentId":"claude","externalModel":"sonnet",
                 "externalReasoning":"high","externalSandbox":"bypassPermissions"}"#,
         )
         .expect("parse");
         assert_eq!(req.cancel_after_ms, Some(1500));
         assert!(req.compute_context_stats);
+        assert!(req.probe_models);
         assert_eq!(req.external_agent_id.as_deref(), Some("claude"));
         assert_eq!(req.external_model.as_deref(), Some("sonnet"));
         assert_eq!(req.external_reasoning.as_deref(), Some("high"));

@@ -316,6 +316,7 @@ function ExternalModelSelectorBase({
   const [loading, setLoading] = useState(false)
   // source: probed=真实探测 / fallback=探测失败降级静态表（显示"默认列表"角标 + 重试）。
   const [source, setSource] = useState<'probed' | 'fallback'>('probed')
+  const [probeError, setProbeError] = useState<string | null>(null)
   // CLI 自己当前配置的模型（codex config.toml / ACP currentModelId / claude resolved）。用于胶囊
   // 显示真实名字并在用户未显式选择时自动同步；null = 该 CLI 无「当前」概念 → 显示「自动」。
   const [currentModel, setCurrentModel] = useState<string | null>(null)
@@ -343,6 +344,7 @@ function ExternalModelSelectorBase({
           setReasoningOptions(result.reasoningOptions)
           setReasoningByModel(result.reasoningByModel ?? {})
           setSource(result.source)
+          setProbeError(result.probeError ?? null)
           setCurrentModel(result.currentModel ?? null)
           setCurrentReasoning(result.currentReasoning ?? null)
           // 自动同步 CLI 当前配置：仅当用户未显式选择（externalModel 空 / 'default'）时。
@@ -373,10 +375,11 @@ function ExternalModelSelectorBase({
             onModelChangeRef.current(nextModel, nextReasoning)
           }
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (modelsReqIdRef.current !== reqId) return
           // 不再静默吞错：置为降级态，展示重试。保留上次模型列表不清空。
           setSource('fallback')
+          setProbeError(error instanceof Error ? error.message : String(error))
         })
         .finally(() => {
           if (modelsReqIdRef.current === reqId) setLoading(false)
@@ -391,6 +394,7 @@ function ExternalModelSelectorBase({
       lastAgentIdRef.current = agentId
       // 换 agent：旧 CLI 的 currentModel 立刻失效（探测中显示「获取中…」而非上个 CLI 的模型名）。
       setCurrentModel(null)
+      setProbeError(null)
       setCurrentReasoning(null)
       setReasoningByModel({})
     }
@@ -508,6 +512,11 @@ function ExternalModelSelectorBase({
                     {t.chatRetry}
                   </button>
                 </div>
+              )}
+              {source === 'fallback' && probeError && (
+                <p className="mx-2 mb-2 max-w-[300px] break-words text-xs text-neutral-500" role="status">
+                  {probeError}
+                </p>
               )}
               {models.length === 0 ? (
                 <div

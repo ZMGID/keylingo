@@ -508,6 +508,13 @@ function AgentDetail({
       {agent.id === 'dsh' && !agent.available && (
         <p className="kv-row-desc">{t.externalAgentsDshInstallHint}</p>
       )}
+      {agent.id === 'antigravity' && (
+        <p className="kv-row-desc">
+          {lang === 'zh'
+            ? '首次使用请在终端运行 agy 完成登录。默认遵循 CLI 权限配置，需要确认的操作可能被拒绝；可在聊天底栏选择权限模式。'
+            : 'Run agy in a terminal to sign in first. Native CLI permissions apply by default; operations requiring confirmation may be denied. Choose a permission mode in the chat composer.'}
+        </p>
+      )}
       {(running || result === 'fail') && (
         <div className="kv-cli-card">
           <div className="kv-row-stack">

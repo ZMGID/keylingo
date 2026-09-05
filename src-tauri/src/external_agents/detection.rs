@@ -191,6 +191,7 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             }
         }
         Err(err) => {
+            eprintln!("[external-agent] {} model probe failed: {err}", def.id);
             let models = fallback_models_from_pairs(def.fallback_models);
             // codex fallback：给每个真实模型挂上静态 effort，前端换模型时仍有档位可选。
             let reasoning_by_model = if def.id == "codex" {
@@ -1018,6 +1019,13 @@ pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedA
 /// Agents without a meaningful sandbox flag return an empty list (no capsule shown).
 pub fn sandbox_options_for(agent_id: &str) -> Vec<RuntimeModelOption> {
     let pairs: &[(&str, &str)] = match agent_id {
+        "antigravity" => &[
+            ("default", "遵循 CLI 配置"),
+            ("plan", "计划"),
+            ("accept-edits", "接受编辑"),
+            ("sandbox", "沙箱"),
+            ("always-proceed", "完全放行"),
+        ],
         "claude" => &[
             ("plan", "计划 (只读)"),
             // `default` 档 = 写文件 / 跑命令前弹卡片问用户（走 stdio 控制通道的
@@ -1217,6 +1225,7 @@ async fn probe_models(
             .args(args)
             .current_dir(cwd)
             .no_console_window()
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -1424,6 +1433,27 @@ fn parse_models_list(agent_id: &str, stdout: &str) -> Option<Vec<RuntimeModelOpt
     let mut out = vec![default_model_option()];
     // 曾是多 CLI 的 match（kimi `provider list --json` 分支随 kimi 迁 ACP 删除）；现在只剩
     // codex 一家还走文本 list-models 探测。
+    if agent_id == "antigravity" {
+        let mut seen = HashSet::new();
+        for line in trimmed.lines() {
+            let Some((id, label)) = line.split_once('\t') else {
+                continue;
+            };
+            let (id, label) = (id.trim(), label.trim());
+            if id.is_empty()
+                || label.is_empty()
+                || id.chars().any(char::is_whitespace)
+                || !seen.insert(id.to_string())
+            {
+                continue;
+            }
+            out.push(RuntimeModelOption {
+                id: id.into(),
+                label: label.into(),
+                context_window_tokens: None,
+            });
+        }
+    }
     if agent_id == "codex" {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(models) = value.get("models").and_then(|v| v.as_array()) {
@@ -1461,6 +1491,14 @@ fn parse_models_list(agent_id: &str, stdout: &str) -> Option<Vec<RuntimeModelOpt
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_models_parse_tab_separated_catalog_not_log_lines() {
+        let models = parse_models_list("antigravity", "Fetching available models...\nmy-model\tMy Model\nmy-model\tDuplicate\nother\tOther Model\n").unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[1].id, "my-model");
+        assert_eq!(models[1].label, "My Model");
+        assert!(parse_models_list("antigravity", "Authentication required").is_none());
+    }
 
     #[tokio::test]
     #[ignore = "requires live pi CLI on PATH"]

@@ -3,6 +3,15 @@ import { mapExternalCliSlashCommands } from './externalCliSlashCommands'
 import { commandMatches } from './slashCommands'
 
 describe('mapExternalCliSlashCommands', () => {
+  it('maps Antigravity reports and namespaced skills to native CLI items', () => {
+    const commands = mapExternalCliSlashCommands('antigravity', [
+      { name: 'usage', slash: '/usage', description: 'Quota' },
+      { name: 'plugin:review', slash: '/plugin:review', argumentHint: 'task' },
+    ])
+    expect(commands.every((item) => item.category === 'Antigravity CLI' && item.kind === 'cli')).toBe(true)
+    expect(commands[1].argumentHint).toBe('task')
+    expect(commandMatches(commands[1], 'review')).toBe(true)
+  })
   it('maps probed Claude commands into slash popover items', () => {
     const commands = mapExternalCliSlashCommands('claude', [
       { name: 'compact', slash: '/compact', description: 'Compact history' },

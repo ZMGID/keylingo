@@ -65,6 +65,7 @@ fn agent_login_hint(agent_id: &str) -> (&'static str, &'static str) {
         "cursor-agent" => ("Cursor Agent", "cursor-agent login"),
         "opencode" => ("OpenCode", "opencode auth login"),
         "gemini" => ("Gemini CLI", "gemini"),
+        "antigravity" => ("Antigravity CLI", "agy"),
         "kimi" => ("Kimi CLI", "kimi"),
         "pi" => ("Pi", "pi"),
         "hermes" => ("Hermes", "hermes"),

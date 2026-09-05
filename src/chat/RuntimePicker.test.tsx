@@ -57,6 +57,7 @@ describe('ExternalModelSelector', () => {
       fireEvent.click(screen.getByRole('button'))
     })
     expect(screen.getByText('探测失败，显示默认列表')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('boom')
 
     // 点重试 → 以 force=true 重探。
     act(() => {
@@ -64,6 +65,7 @@ describe('ExternalModelSelector', () => {
     })
     await waitFor(() => expect(detectModels).toHaveBeenCalledTimes(2))
     expect(detectModels.mock.calls[1][2]).toBe(true)
+    await waitFor(() => expect(screen.queryByText('boom')).not.toBeInTheDocument())
   })
 
   it('probed 结果不显示降级提示', async () => {

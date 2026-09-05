@@ -354,6 +354,21 @@ pub async fn resolve_binary(def: &RuntimeAgentDef) -> Option<PathBuf> {
             }
         }
     }
+    // The desktop process may still have the PATH from before the official agy install.
+    if def.id == "antigravity" {
+        let path = if cfg!(windows) {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .map(|p| p.join("agy/bin/agy.exe"))
+        } else {
+            directories::UserDirs::new().map(|d| d.home_dir().join(".local/bin/agy"))
+        };
+        if let Some(path) = path.filter(|p| p.is_file()) {
+            if probe_executable_cached(&path, def.version_args).await {
+                return Some(path);
+            }
+        }
+    }
     // Windows PATH 上没有能拉起来的 Win32 候选时，再看 WSL 里的 Linux 安装。
     // 不插到 PATH 候选前面：本机已经装了 Windows 版 CLI 的人不能被 WSL 里同名二进制抢走。
     for candidate in std::iter::once(def.bin).chain(def.fallback_bins.iter().copied()) {

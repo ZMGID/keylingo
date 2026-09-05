@@ -25,6 +25,8 @@ import { useConversationTransition } from './conversationTransitionStore'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
+import { CliCommandReport } from './CliCommandReport'
+import { normalizeLegacyCliReport, parseCliReport } from './cliCommandReportData'
 
 interface ChatMarkdownProps {
   content: string
@@ -757,6 +759,10 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
     const languageMatch = /language-([\w-]+)/.exec(child.props.className ?? '')
     const language = normalizeCodeLanguage(languageMatch?.[1])
     const code = codeChildrenToString(child.props.children)
+    if (language === 'kivio-cli-report') {
+      const report = parseCliReport(code)
+      if (report) return <CliCommandReport report={report} />
+    }
     if (language === 'html') {
       return <HtmlCodePreview html={code} />
     }
@@ -1119,7 +1125,7 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
   const normalized = useMemo(() => {
     const build = () => {
       const normalizedContent = preserveLocalMarkdownLinks(
-        normalizeMarkdownForRender(normalizeLegacyErrorDetails(content)),
+        normalizeMarkdownForRender(normalizeLegacyCliReport(normalizeLegacyErrorDetails(content))),
       )
       return { normalized: normalizedContent }
     }

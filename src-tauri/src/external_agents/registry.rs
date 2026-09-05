@@ -1,4 +1,4 @@
-use crate::external_agents::defs::{acp, claude, codex, dsh, grok, pi};
+use crate::external_agents::defs::{acp, antigravity, claude, codex, dsh, grok, pi};
 use crate::external_agents::types::RuntimeAgentDef;
 
 pub const AGENT_DEFS: &[RuntimeAgentDef] = &[
@@ -12,6 +12,7 @@ pub const AGENT_DEFS: &[RuntimeAgentDef] = &[
     acp::HERMES_AGENT_DEF,
     grok::GROK_AGENT_DEF,
     dsh::DSH_AGENT_DEF,
+    antigravity::ANTIGRAVITY_AGENT_DEF,
 ];
 
 pub fn get_agent_def(id: &str) -> Option<&'static RuntimeAgentDef> {
@@ -23,8 +24,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_ten_agents() {
-        assert_eq!(AGENT_DEFS.len(), 10);
+    fn registry_has_eleven_agents() {
+        assert_eq!(AGENT_DEFS.len(), 11);
+        assert!(get_agent_def("antigravity").is_some());
         assert!(get_agent_def("claude").is_some());
         assert!(get_agent_def("opencode").is_some());
         assert!(get_agent_def("pi").is_some());
