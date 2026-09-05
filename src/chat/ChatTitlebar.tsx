@@ -46,7 +46,7 @@ export const ChatTitlebar = memo(function ChatTitlebar({
 }: ChatTitlebarProps) {
   return (
     <div
-      className={`chat-titlebar-strip${settingsMode ? ' chat-titlebar-strip--settings' : ''}${hideNav && !settingsMode ? ' chat-titlebar-strip--solid' : ''}`}
+      className={`chat-titlebar-strip${settingsMode ? ' chat-titlebar-strip--settings' : ''}${hideNav && !settingsMode ? ' chat-titlebar-strip--popout' : ''}`}
       data-tauri-drag-region
     >
       {!settingsMode && !hideNav && (

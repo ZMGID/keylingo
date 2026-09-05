@@ -314,6 +314,12 @@ fn model_database_image_generation(model: &str) -> Option<bool> {
 /// 适配器映射：4.5 及更早 → `budget_tokens`（Opus 4.5 另带 `output_config.effort`），
 /// 4.6+ → adaptive + effort。始终只保留已知合法值并去重，避免脏数据进入请求。
 pub fn reasoning_efforts_for_model(provider: Option<&ModelProvider>, model: &str) -> Vec<String> {
+    // Antigravity OAuth catalog variants already select the effort through the model ID.
+    if provider.is_some_and(crate::provider_oauth::antigravity::is_provider)
+        && crate::provider_oauth::antigravity::model_includes_effort(model)
+    {
+        return vec![];
+    }
     if let Some(list) = provider
         .and_then(|provider| override_model_info(provider, model))
         .and_then(|info| info.reasoning_efforts.as_deref())
@@ -1439,6 +1445,33 @@ mod tests {
         assert_eq!(WebSearchMode::Builtin.for_provider(&provider), WebSearchMode::ThirdParty);
         assert_eq!(WebSearchMode::Off.for_provider(&provider), WebSearchMode::Off);
         assert_eq!(WebSearchMode::ThirdParty.for_provider(&provider), WebSearchMode::ThirdParty);
+    }
+
+    #[test]
+    fn antigravity_oauth_effort_variants_hide_knob_and_ignore_request_overrides() {
+        use crate::provider_oauth::antigravity;
+        let mut provider = test_provider_with_overrides(HashMap::new());
+        provider.api_format = "gemini".into();
+        let model = "gemini-3.8-flash-low";
+        assert!(!reasoning_efforts_for_model(Some(&provider), model).is_empty());
+        provider.request.oauth = Some(serde_json::from_value(serde_json::json!({
+            "provider": "antigravity"
+        })).unwrap());
+        for model in ["gemini-3.8-flash-low", "gemini-3.8-flash-high", "gpt-oss-120b-medium"] {
+            assert!(reasoning_efforts_for_model(Some(&provider), model).is_empty());
+            let request = antigravity::wrap_request(&provider, model, serde_json::json!({
+                "generationConfig": {"thinkingConfig": {
+                    "includeThoughts": true, "thinkingLevel": "HIGH", "thinkingBudget": 8192
+                }}
+            }));
+            let thinking = &request["request"]["generationConfig"]["thinkingConfig"];
+            assert!(thinking.get("thinkingLevel").is_none());
+            assert!(thinking.get("thinkingBudget").is_none());
+            if model.starts_with("gemini") {
+                assert_eq!(thinking["includeThoughts"], true);
+            }
+        }
+        assert!(!reasoning_efforts_for_model(Some(&provider), "gemini-3.8-flash").is_empty());
     }
 
     #[test]

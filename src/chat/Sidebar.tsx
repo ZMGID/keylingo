@@ -1388,7 +1388,7 @@ export const Sidebar = memo(function Sidebar({
         )}
 
       <nav
-        className={`shrink-0 space-y-0.5 px-3 pb-2 ${usesNativeTitlebar ? '' : 'pt-2'}`}
+        className={`shrink-0 space-y-0.5 px-2 pb-2 ${usesNativeTitlebar ? '' : 'pt-2'}`}
         data-tauri-drag-region="false"
       >
         <NavRow
@@ -1410,18 +1410,18 @@ export const Sidebar = memo(function Sidebar({
         />
       </nav>
 
-      <div className="mx-3 border-t border-neutral-200/90 dark:border-neutral-800" />
+      <div className="mx-2 border-t border-neutral-200/90 dark:border-neutral-800" />
 
       <div className="flex min-h-0 flex-1 flex-col" data-tauri-drag-region="false">
         {loading ? (
-          <div className="space-y-2 px-3 py-3" aria-label={t.chatLoading} aria-busy="true">
+          <div className="space-y-2 px-2 py-3" aria-label={t.chatLoading} aria-busy="true">
             {[0, 1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="kv-skeleton h-7 rounded-lg" />
             ))}
           </div>
         ) : (
           <>
-            <div className="flex items-center justify-between px-3 pb-1 pt-3">
+            <div className="flex items-center justify-between px-2 pb-1 pt-3">
               <div className="flex items-center gap-1.5 text-[13px] font-semibold">
                 {([
                   ['conversations', t.chatTabRecent],
@@ -1551,7 +1551,7 @@ export const Sidebar = memo(function Sidebar({
                 document.body,
               )}
             {activeTab === 'projects' && (
-            <section key="projects" className="chat-motion-tab-in group/projects px-3 pb-2 pt-1">
+            <section key="projects" className="chat-motion-tab-in group/projects px-2 pb-2 pt-1">
                 <div className="mt-1.5 space-y-1">
                   {visibleProjects.map((project) => {
                     const active = selectedProject?.id === project.id
@@ -1694,7 +1694,7 @@ export const Sidebar = memo(function Sidebar({
             )}
 
             {activeTab === 'sets' && (
-            <section key="sets" className="chat-motion-tab-in group/sets px-3 pb-2 pt-1">
+            <section key="sets" className="chat-motion-tab-in group/sets px-2 pb-2 pt-1">
                 <div className="mt-1.5 space-y-1">
                   {sets.length === 0 ? (
                     <button
@@ -1847,7 +1847,7 @@ export const Sidebar = memo(function Sidebar({
             )}
 
             {activeTab === 'conversations' && (
-            <section key="conversations" className="chat-motion-tab-in group/conversations px-3 pb-5 pt-1">
+            <section key="conversations" className="chat-motion-tab-in group/conversations px-2 pb-5 pt-1">
               {sectionMenuAnchor && (
                 <ChatSectionMenu
                   anchor={sectionMenuAnchor}

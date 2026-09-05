@@ -20,6 +20,17 @@ describe('ThinkingLevelSelector', () => {
     reasoningEffortsForModel.mockResolvedValue(['low', 'medium', 'high'])
   })
 
+  it('OAuth 档位模型返回空能力时隐藏旋钮，不回写残留的会话档位', async () => {
+    reasoningEffortsForModel.mockResolvedValue([])
+    const onChange = vi.fn()
+    await act(async () => {
+      render(<ThinkingLevelSelector value="high" currentProviderId="antigravity-oauth" currentModel="gemini-3.8-flash-low" onChange={onChange} />)
+    })
+    expect(reasoningEffortsForModel).toHaveBeenCalledWith('gemini-3.8-flash-low', 'antigravity-oauth')
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('value=null 时按默认档显示 High（不再有「跟随全局」）', () => {
     render(
       <ThinkingLevelSelector

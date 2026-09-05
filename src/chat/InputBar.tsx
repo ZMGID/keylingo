@@ -1757,7 +1757,7 @@ export const InputBar = memo(function InputBar({
   const wrapperClass =
     layout === 'inline'
       ? 'w-full'
-      : 'chat-composer-footer shrink-0 px-6 pb-8 pt-2'
+      : 'chat-composer-footer shrink-0 px-6 pb-4 pt-2'
 
   const innerClass = layout === 'inline' ? 'w-full' : 'mx-auto w-full max-w-4xl'
   const slashPanelPlacementClass = layout === 'inline'

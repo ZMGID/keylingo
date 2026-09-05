@@ -16,10 +16,22 @@ pub fn build_antigravity_args(
     ];
     // Resume is supplied by the persisted live handle in connect(), never --continue.
     // agy allocates its own conversation id; a Kivio-generated UUID is not a new-session flag.
+    // Catalog variants own their effort; never let a stale session override it.
+    let model_has_effort = options.model.as_deref().is_some_and(|model| {
+        model.trim().rsplit_once('-').is_some_and(|(_, suffix)| {
+            matches!(
+                suffix.to_ascii_lowercase().as_str(),
+                "low" | "medium" | "high"
+            )
+        })
+    });
     for (flag, value) in [
         ("--model", &options.model),
         ("--effort", &options.reasoning),
     ] {
+        if flag == "--effort" && model_has_effort {
+            continue;
+        }
         if let Some(value) = value
             .as_deref()
             .map(str::trim)
@@ -96,6 +108,7 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--add-dir", r"C:\my project"]));
         assert!(args.windows(2).any(|w| w == ["--model", "my-model"]));
+        assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
         assert!(!args.iter().any(|v| [
             "old",
             "new",
@@ -107,5 +120,29 @@ mod tests {
         options.sandbox = Some("always-proceed".into());
         assert!(build_antigravity_args(&ctx, &options, None)
             .contains(&"--dangerously-skip-permissions".into()));
+    }
+
+    #[test]
+    fn catalog_effort_variants_ignore_stale_reasoning() {
+        let ctx = RuntimeContext {
+            extra_allowed_dirs: vec![],
+            resume_session_id: None,
+            new_session_id: None,
+            include_partial_messages: false,
+        };
+        for model in [
+            "gemini-3.8-flash-low",
+            "gemini-3.8-flash-high",
+            "gpt-oss-120b-medium",
+        ] {
+            let options = RuntimeBuildOptions {
+                model: Some(model.into()),
+                reasoning: Some("high".into()),
+                sandbox: None,
+            };
+            let args = build_antigravity_args(&ctx, &options, None);
+            assert!(args.windows(2).any(|w| w == ["--model", model]));
+            assert!(!args.iter().any(|v| v == "--effort"));
+        }
     }
 }

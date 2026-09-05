@@ -23,6 +23,6 @@ describe('ChatTitlebar', () => {
     const strip = container.querySelector('.chat-titlebar-strip')
     expect(strip).toBeTruthy()
     expect(strip?.classList.contains('chat-titlebar-strip--settings')).toBe(false)
-    expect(strip?.classList.contains('chat-titlebar-strip--solid')).toBe(true)
+    expect(strip?.classList.contains('chat-titlebar-strip--popout')).toBe(true)
   })
 })

@@ -655,17 +655,18 @@ html.windows body {
   box-shadow: none;
 }
 
-/* ===== 三张悬浮卡片（侧栏 / 主区 / 右 Dock）的共同外观 =====
-   四周留 8px，缝隙透出 .chat-window-shell 的 --theme-surface。
+/* ===== 侧栏 / 主区 / 右 Dock 的共同外观 =====
+   外沿和面板间隙共用 --chat-card-inset，缝隙透出窗口底色。
    色彩对齐 Claude Code：卡片与外壳几乎同亮度（差 ~2%），分离感几乎全部来自那道缝 +
    一条极淡的 hairline。反直觉但关键 —— 灰阶差一旦超过 4%，就从「一张纸浮起来」
    退回「几块拼在一起的板」。所以用 --theme-surface-soft（≈2% 差）而不是 muted（3.5%，偏重），
    描边也不能用 border-strong（近白卡片上会读成一条灰线）。
    高度由 flex align-items:stretch 减掉上下 margin 得出（所以三者都不能再挂 h-full）。 */
-/* 卡片上缝。有全宽顶栏带时收窄：带高 44、内容 28，带自身已经在卡片上方留了 8px 光学
-   留白，再叠 8px 就读成两段。侧/下缝保持 8。 */
+/* macOS 保留原生交通灯对应的卡片位置；Windows / Linux 使用紧凑外沿。 */
 :root {
   --chat-card-top: 8px;
+  --chat-card-inset: 8px;
+  --chat-card-radius: 12px;
   /* 交通灯中心距窗口内容顶缘的距离；整条 macOS 顶栏线（灯 / 侧栏那两枚图标 / 模型 /
      思考强度 / 审批）都对到这条线上。默认 30px 只是兜底 —— 真值由 ChatWindowHost
      从 AppKit 量出来后覆写，因为它随 macOS 版本变（见 windows.rs 那条注释）。 */
@@ -673,14 +674,16 @@ html.windows body {
 }
 
 .chat-window-shell:has(> .chat-titlebar-strip) {
-  --chat-card-top: 2px;
+  --chat-card-top: 1px;
+  --chat-card-inset: 4px;
+  --chat-card-radius: 8px;
 }
 
 .chat-sidebar-shell,
 .chat-main-pane,
 .chat-center-page,
 .chat-dock-shell {
-  border-radius: 12px;
+  border-radius: var(--chat-card-radius);
   background: var(--theme-surface-soft);
   border: 1px solid rgba(24, 24, 27, 0.07);
   box-shadow:
@@ -695,15 +698,14 @@ html.windows body {
   /* Keep Markdown/layout invalidation inside the reading surface when the
      sidebar or right dock changes the available width. */
   contain: layout paint;
-  /* 左右不留 margin：缝隙由侧栏的 margin-right:8 与 Dock 的 margin-left:8 提供。
-     若这里也写 8，相邻处会叠成 16px 双倍缝。两侧收起时各自补 8px（见 .is-collapsed）。 */
-  margin: var(--chat-card-top) 0 8px;
+  /* 左右缝隙由侧栏和 Dock 提供，避免相邻 margin 叠加；折叠后仍保留同宽外沿。 */
+  margin: var(--chat-card-top) 0 var(--chat-card-inset);
 }
 
-/* 弹出窗没有侧栏 / Dock，自己补左右 8px，否则卡片贴窗口边。 */
+/* 弹出窗没有侧栏 / Dock，自己补左右外沿。 */
 .chat-main-pane--lone {
-  margin-left: 8px;
-  margin-right: 8px;
+  margin-left: var(--chat-card-inset);
+  margin-right: var(--chat-card-inset);
 }
 
 .chat-message-list-inner {
@@ -726,10 +728,10 @@ html.windows body {
 
 /* 扩展中心页（助手 / Skill / MCP / 知识库 / 笔记 / 插件）：与会话主区同一张浮起的纸。
    刻意不复用 .chat-main-pane —— 那个带 container-name: chat-main，会把会话布局的容器
-   查询接到中心页宽度上。右缝也得自己补：会话页那 8px 由收起态 Dock 的 margin-left 提供，
+   查询接到中心页宽度上。右缝也得自己补：会话页由收起态 Dock 的 margin-left 提供，
    中心页不渲染 Dock（见 Chat.tsx 的 `chatView === 'conversation' && <RightDock>`）。 */
 .chat-center-page {
-  margin: var(--chat-card-top) 8px 8px 0;
+  margin: var(--chat-card-top) var(--chat-card-inset) var(--chat-card-inset) 0;
   overflow: hidden;
 }
 
@@ -780,7 +782,7 @@ html.windows body {
 
 .chat-sidebar-shell {
   width: var(--chat-sidebar-width, 240px);
-  margin: var(--chat-card-top) 8px 8px;
+  margin: var(--chat-card-top) var(--chat-card-inset) var(--chat-card-inset);
   /* 折叠时只做透明度动画。不要 transition margin-left：它会让 flex 主区在每一帧改变宽度，
      长聊天里的 Markdown / 代码块随之连续重排，侧栏动画会把聊天区一起拖卡。布局位置一次切换，
      由外壳 overflow:hidden 裁掉滑出的卡片。也不要 transition width：拖拽调宽走 rAF 直写变量。 */
@@ -832,7 +834,7 @@ html.windows body {
   transition: none;
 }
 
-/* 侧栏顶栏：只上移那俩图标，卡片本身仍四周 margin:8 悬浮。
+/* 侧栏顶栏：只上移那俩图标，卡片本身沿用统一外沿。
    基线（Windows / Linux）保持 5/3，行总高 40。macOS 见下面那条按灯对齐的覆写。 */
 .chat-sidebar-shell > .chat-sidebar-titlebar-row {
   align-items: flex-start;
@@ -850,16 +852,13 @@ html.windows body {
 }
 
 .chat-sidebar-shell.is-collapsed {
-  /* 负 margin 等于侧栏宽、不加那 8px：卡片 border box 完全出屏，同时布局推进
-     = -W + W + margin-right 8 = 8，把那 8px 留给主区卡片当左缝。 */
+  /* 负 margin 等于侧栏宽，卡片完全出屏；margin-right 留给主区当左侧外沿。 */
   margin-left: calc(-1 * var(--chat-sidebar-width, 240px));
   opacity: 0;
   pointer-events: none;
 }
 
-/* 设置页齐边铺满：不再需要会话浮卡那 8px 左缝，否则会在导航栏左边露一条
-   透底（Mica/透明外壳下直接看到桌面）。收成 0 布局占位：
-   -W + W + 0 = 0（普通折叠是 -W + W + 8 = 8）。 */
+/* 设置页齐边铺满：撤掉折叠侧栏留下的外沿，避免导航栏左边透出桌面。 */
 .chat-sidebar-shell.is-collapsed.is-settings-cover {
   margin-right: 0;
 }
@@ -867,7 +866,7 @@ html.windows body {
 .chat-dock-shell {
   /* 宽度由内联 CSS 变量 --chat-dock-width 驱动（拖拽时 rAF 直写，不经 React）。 */
   width: var(--chat-dock-width, 360px);
-  margin: var(--chat-card-top) 8px 8px;
+  margin: var(--chat-card-top) var(--chat-card-inset) var(--chat-card-inset);
   /* 折叠：负 margin-right 把整张卡片滑出右侧，宽度不变内容不被压缩。 */
   transition:
     margin-right var(--kv-dur-slow) var(--kv-ease-standard),
@@ -875,8 +874,7 @@ html.windows body {
 }
 
 .chat-dock-shell.is-collapsed {
-  /* 不再减那 8px：布局推进 = margin-left 8 + W - W = 8，留给主区卡片当右缝；
-     卡片 border box 从行右缘起算，仍完全出屏。 */
+  /* 卡片完全出屏，margin-left 仍留给主区当右侧外沿。 */
   margin-right: calc(-1 * var(--chat-dock-width, 360px));
   opacity: 0;
   pointer-events: none;
@@ -1435,7 +1433,7 @@ button.chat-composer-status-item:hover {
   .chat-composer-footer {
     padding-left: 1rem;
     padding-right: 1rem;
-    padding-bottom: 1.25rem;
+    padding-bottom: 1rem;
     padding-top: 0.375rem;
   }
 
@@ -1579,7 +1577,7 @@ button.chat-composer-status-item:hover {
   }
 
   .chat-composer-footer {
-    padding-bottom: 0.75rem;
+    padding-bottom: 1rem;
   }
 }
 
@@ -3508,30 +3506,26 @@ button.chat-composer-status-item:hover {
    所以高度按 32px 胶囊控件取 44（38 只够放三键，装不下控件）。
    侧栏卡片 / Dock / 主区都在带下方，故三键可贴角、不必让各视图 padding-right 躲开。
 
-   padding-left 按**盒子左缘**对齐窗口内容左缘：侧栏卡片 margin-left 8，所以第一枚按钮的
-   盒子左缘也放 8 —— 顶栏钮与下方侧栏卡片共一条竖直边。
-   （曾按 glyph 对到侧栏 NavRow 图标列 P=29；那让按钮离窗口边太远，改回按边对齐。
-   代价：顶栏铅笔 glyph 比侧栏「新建聊天」铅笔靠左 ~21px，这是有意的取舍。） */
+   第一枚按钮的盒子左缘与侧栏外沿对齐，共用 --chat-card-inset。 */
 .chat-titlebar-strip {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 2px;
   height: 44px;
-  padding-left: 8px;
+  padding-left: var(--chat-card-inset);
 }
 
-/* 弹出窗：带不透明，挡住 Mica / 正文透上来叠在标题上。主聊天仍透出窗口底色。 */
-.chat-titlebar-strip--solid {
+/* 独立窗口沿用主窗口的顶栏底色，由外壳统一处理 Mica 和深浅色。
+   顶栏仍占独立一行；提高层级仅用于保证下拉菜单显示在正文之上。 */
+.chat-titlebar-strip--popout {
   position: relative;
   z-index: 20;
-  background: var(--theme-surface);
 }
 
 /* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，
    把业务控件推到主区卡片左缘 —— 否则控件压在侧栏卡片上方，读作错位。
-   宽度 = 主区卡片左缘（侧栏 margin 8 + 宽 + margin 8）− 带自身 padding-left 8
-        = var(--chat-sidebar-width) + 8，与 `.chat-sidebar-shell` 同步。
+   宽度 = 侧栏宽 + 面板间隙 − 顶栏 flex gap，与 `.chat-sidebar-shell` 同步。
    用 min-width 而非 width 做过渡：width 的收起态是 auto（按钮自然宽），auto 不可插值、
    动画会直接跳；min-width 两端都是具体值，且 max(内容宽, min-width) 天然贴合按钮宽度，
    不必把「两枚 28px 钮 + 2px 间距」这种数字硬编码进来。
@@ -3546,7 +3540,7 @@ button.chat-composer-status-item:hover {
 }
 
 .chat-titlebar-strip-nav--reserve {
-  min-width: calc(var(--chat-sidebar-width, 240px) + 8px);
+  min-width: calc(var(--chat-sidebar-width, 240px) + var(--chat-card-inset) - 2px);
 }
 
 /* 设置页：带浮起、不占行高，让 200/52px 灰导航栏自己从 y=0 画起（见 ChatTitlebar 注释）。
@@ -3583,10 +3577,7 @@ button.chat-composer-status-item:hover {
   flex-shrink: 0;
 }
 
-/* Windows caption 键规格：46 宽、方角、无容器（无描边 / 无阴影 / 无毛玻璃）。
-   高度撑满整条带并贴住窗口顶边 —— 原生 caption 键的命中区就是顶到窗口边缘的
-   （最大化后鼠标甩到屏幕顶角仍能点中）。刻意不做垂直居中：带 38 − 键 32 的那 6px
-   会在 hover 填色时露成「红块上下各缺一条」。 */
+/* Windows 窗口按钮保留 46px 宽、整条顶栏高的命中区，图标与工具栏共用线宽和中性色。 */
 .chat-win-controls--win {
   gap: 0;
   align-self: stretch;
@@ -3597,9 +3588,10 @@ button.chat-composer-status-item:hover {
   width: 46px;
   height: 100%;
   place-items: center;
+  padding: 0;
   border: none;
   background: transparent;
-  color: #1f1f23;
+  color: #525252;
   border-radius: 0;
   line-height: 1;
   cursor: default;
@@ -3610,6 +3602,7 @@ button.chat-composer-status-item:hover {
 
 .chat-win-btn:hover {
   background: rgba(0, 0, 0, 0.055);
+  color: #171717;
 }
 
 .chat-win-btn:active {
@@ -3627,11 +3620,12 @@ button.chat-composer-status-item:hover {
 }
 
 .dark .chat-win-btn {
-  color: #e8e8ea;
+  color: #a3a3a3;
 }
 
 .dark .chat-win-btn:hover {
   background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f5;
 }
 
 .dark .chat-win-btn:active {
@@ -3651,6 +3645,15 @@ button.chat-composer-status-item:hover {
 @container chat-window (max-width: 520px) {
   .assistant-center-tabs {
     overflow-x: auto;
+  }
+}
+
+/* 全宽标题栏在 chat-main 容器之外，极窄窗口需按整窗宽度启用同一套紧凑控件。 */
+@container chat-window (max-width: 480px) {
+  .chat-titlebar-strip .chat-model-selector-label,
+  .chat-titlebar-strip .chat-model-selector-caret,
+  .chat-titlebar-strip .chat-thinking-pill-wrap {
+    display: none;
   }
 }
 

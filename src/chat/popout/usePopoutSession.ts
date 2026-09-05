@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/tauri'
+import { withExternalModel } from '../externalModelEffort'
 import { syncChatProtocol } from '../../api/chatProtocol'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../../api/settingsCache'
 import {
@@ -470,12 +471,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
 
   const handleExternalModelChange = useCallback(async (model: string, reasoning?: string | null) => {
     const current = normalizeAgentRuntime(conversation)
-    await handleRuntimeChange({
-      ...current,
-      kind: 'external',
-      externalModel: model,
-      externalReasoning: reasoning ?? current.externalReasoning ?? null,
-    })
+    await handleRuntimeChange(withExternalModel(current, model, reasoning))
   }, [conversation, handleRuntimeChange])
 
   const handleApprovalPolicyChange = useCallback(async (nextApprovalPolicy: string) => {

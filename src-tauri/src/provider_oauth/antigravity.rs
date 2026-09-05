@@ -47,6 +47,12 @@ pub fn is_provider(p: &ModelProvider) -> bool {
         .as_ref()
         .is_some_and(|a| a.provider == "antigravity")
 }
+
+pub(crate) fn model_includes_effort(model: &str) -> bool {
+    model.trim().rsplit_once('-').is_some_and(|(_, suffix)| {
+        matches!(suffix.to_ascii_lowercase().as_str(), "low" | "medium" | "high")
+    })
+}
 pub fn unwrap_response(mut value: Value) -> Value {
     if value.get("response").is_some() && value.get("error").is_none() {
         value["response"].take()
@@ -352,6 +358,13 @@ pub fn wrap_request(provider: &ModelProvider, model: &str, mut body: Value) -> V
     if custom {
         if let Some(config) = body["generationConfig"].as_object_mut() {
             config.remove("thinkingConfig");
+        }
+    } else if model_includes_effort(model) {
+        // The catalog model owns its effort. Keep thought output, but discard
+        // independent overrides from old conversations or auxiliary requests.
+        if let Some(thinking) = body["generationConfig"]["thinkingConfig"].as_object_mut() {
+            thinking.remove("thinkingLevel");
+            thinking.remove("thinkingBudget");
         }
     }
     if let Some(level) = body["generationConfig"]["thinkingConfig"]["thinkingLevel"].as_str() {

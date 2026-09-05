@@ -3,6 +3,7 @@ import { getCurrentWindow, type PhysicalSize } from '@tauri-apps/api/window'
 import { api } from '../api/tauri'
 import { isMac, isWindows, usesNativeTitlebar } from './platform'
 import { isTauriRuntime } from './utils'
+import { WindowMaximizedContext } from './windowMaximizedContext'
 import { syncChatWindowEffect, type ChatEffectPlatform } from './chatWindowEffects'
 
 type ChatWindowHostProps = {
@@ -297,8 +298,10 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
   ].filter(Boolean).join(' ')
 
   return (
-    <div className={hostClassName}>
-      {children}
-    </div>
+    <WindowMaximizedContext.Provider value={maximized}>
+      <div className={hostClassName}>
+        {children}
+      </div>
+    </WindowMaximizedContext.Provider>
   )
 }

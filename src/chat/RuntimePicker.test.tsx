@@ -26,6 +26,38 @@ describe('ExternalModelSelector', () => {
     detectModels.mockReset()
   })
 
+  it('Antigravity 保留档位名称，清除旧覆盖，切换变体时不携带 effort', async () => {
+    const onModelChange = vi.fn()
+    detectModels.mockResolvedValue({
+      models: [
+        { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' },
+        { id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low)' },
+      ],
+      reasoningOptions: [{ id: 'high', label: 'High' }, { id: 'low', label: 'Low' }],
+      source: 'probed',
+    })
+    render(<ExternalModelSelector agentRuntime={{ ...runtime, externalAgentId: 'antigravity', externalModel: 'gemini-3.8-flash-high', externalReasoning: 'low' }} onModelChange={onModelChange} />)
+    const model = await screen.findByRole('button', { name: 'Gemini 3.8 Flash (High)' })
+    await waitFor(() => expect(onModelChange).toHaveBeenCalledWith('gemini-3.8-flash-high', null))
+    expect(screen.queryByRole('button', { name: /思考等级/ })).not.toBeInTheDocument()
+    fireEvent.click(model)
+    fireEvent.click(screen.getByRole('button', { name: 'Gemini 3.8 Flash (Low)' }))
+    expect(onModelChange).toHaveBeenLastCalledWith('gemini-3.8-flash-low', null)
+  })
+
+  it('Antigravity 自动探测档位模型时不回填独立 effort', async () => {
+    const onModelChange = vi.fn()
+    detectModels.mockResolvedValue({
+      models: [{ id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low)' }],
+      reasoningOptions: [{ id: 'high', label: 'High' }],
+      currentModel: 'gemini-3.8-flash-low', currentReasoning: 'high', source: 'probed',
+    })
+    render(<ExternalModelSelector agentRuntime={{ ...runtime, externalAgentId: 'antigravity' }} onModelChange={onModelChange} />)
+    await screen.findByRole('button', { name: 'Gemini 3.8 Flash (Low)' })
+    expect(onModelChange).toHaveBeenCalledWith('gemini-3.8-flash-low', null)
+    expect(screen.queryByRole('button', { name: /思考等级/ })).not.toBeInTheDocument()
+  })
+
   it('探测失败降级时展示默认列表提示，重试以 force=true 重探', async () => {
     detectModels
       .mockResolvedValueOnce({

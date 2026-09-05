@@ -87,6 +87,7 @@ function TitlebarPills({
       <div className="min-w-4 flex-1 self-stretch" data-tauri-drag-region />
       <div
         data-popout-title
+        data-tauri-drag-region
         className="min-w-0 max-w-[42%] shrink truncate px-2 text-right text-[13px] font-medium text-neutral-700 dark:text-neutral-200"
         title={title}
       >
@@ -119,4 +120,3 @@ export function PopoutTitlebar(props: PopoutTitlebarProps) {
     </header>
   )
 }
-

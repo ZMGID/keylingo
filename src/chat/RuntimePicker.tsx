@@ -8,6 +8,7 @@ import { IconButton } from '../components/Button'
 import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { AgentRuntimeConfig } from './types'
 import { rememberedExternalRuntime } from './lastAgentRuntime'
+import { modelIncludesEffort } from './externalModelEffort'
 import './runtimePicker.css'
 
 const KIVIO_LOGO_SRC = '/logo-mark.png'
@@ -350,6 +351,16 @@ function ExternalModelSelectorBase({
           // 自动同步 CLI 当前配置：仅当用户未显式选择（externalModel 空 / 'default'）时。
           const rt = runtimeRef.current
           const explicitModel = !!rt.externalModel && rt.externalModel !== 'default'
+          const effectiveModel = explicitModel ? rt.externalModel : result.currentModel
+          const effectiveLabel = result.models.find((m) => m.id === effectiveModel)?.label
+          if (modelIncludesEffort(agentId, effectiveModel, effectiveLabel)) {
+            const nextModel = explicitModel ? rt.externalModel! : result.models.some((m) => m.id === effectiveModel)
+              ? effectiveModel! : rt.externalModel ?? 'default'
+            if (nextModel !== (rt.externalModel ?? 'default') || rt.externalReasoning != null) {
+              onModelChangeRef.current(nextModel, null)
+            }
+            return
+          }
           if (explicitModel) return
           const cur = result.currentModel
           // 当前模型是列表里可选的真实 id（grok / codex）才回填 externalModel；claude 的 resolved
@@ -417,6 +428,7 @@ function ExternalModelSelectorBase({
       agentRuntime.externalModel && agentRuntime.externalModel !== 'default'
         ? agentRuntime.externalModel
         : currentModel
+    if (modelIncludesEffort(agentRuntime.externalAgentId, modelId, models.find((m) => m.id === modelId)?.label)) return []
     if (modelId && Object.prototype.hasOwnProperty.call(reasoningByModel, modelId)) {
       return reasoningByModel[modelId] ?? []
     }
@@ -425,7 +437,7 @@ function ExternalModelSelectorBase({
       return []
     }
     return reasoningOptions
-  }, [agentRuntime.externalModel, currentModel, reasoningByModel, reasoningOptions])
+  }, [agentRuntime.externalAgentId, agentRuntime.externalModel, currentModel, models, reasoningByModel, reasoningOptions])
 
   const reasoningPillValue = agentRuntime.externalReasoning ?? 'default'
   const currentReasoningLabel = useMemo(() => {
@@ -454,21 +466,24 @@ function ExternalModelSelectorBase({
     return raw
   }, [activeReasoningOptions, agentRuntime.externalReasoning, currentReasoning, reasoningPillValue])
   const displayName = useMemo(() => {
+    const formatLabel = (label: string) => agentRuntime.externalAgentId === 'antigravity'
+      ? mapDefaultLabel(label)
+      : stripProviderPrefix(stripParenthetical(mapDefaultLabel(label)))
     const currentId = agentRuntime.externalModel
     const explicit = !!currentId && currentId !== 'default'
     // 显式选择：显示所选模型 label（探测中列表未到时退回原始 id）。
     if (explicit) {
       const selected = models.find((item) => item.id === currentId)
-      return stripProviderPrefix(stripParenthetical(mapDefaultLabel(selected?.label ?? currentId)))
+      return formatLabel(selected?.label ?? currentId)
     }
     // 未显式选择：优先显示 CLI 当前配置模型的真实名字；探测中显示「获取中…」；都没有则「自动」。
     if (currentModel) {
       const inList = models.find((item) => item.id === currentModel)
-      return stripProviderPrefix(stripParenthetical(mapDefaultLabel(inList?.label ?? currentModel)))
+      return formatLabel(inList?.label ?? currentModel)
     }
     if (loading) return t.chatRuntimeFetching
     return 'Auto'
-  }, [agentRuntime.externalModel, models, currentModel, loading, t])
+  }, [agentRuntime.externalAgentId, agentRuntime.externalModel, models, currentModel, loading, t])
 
   if (agentRuntime.kind !== 'external' || !agentRuntime.externalAgentId) {
     return null
@@ -481,10 +496,11 @@ function ExternalModelSelectorBase({
           type="button"
           onClick={() => setOpen(!open)}
           className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
+          title={displayName}
         >
           {/* ponytail: 探测中复用已有的 shimmer 文字动画，不再转圈；chevron 常驻避免宽度跳动 */}
           <span
-            className={`max-w-[140px] truncate font-medium ${loading ? 'reasoning-shimmer-text' : 'text-neutral-800 dark:text-neutral-200'}`}
+            className={`${agentRuntime.externalAgentId === 'antigravity' ? 'max-w-[240px]' : 'max-w-[140px]'} truncate font-medium ${loading ? 'reasoning-shimmer-text' : 'text-neutral-800 dark:text-neutral-200'}`}
           >
             {displayName}
           </span>
@@ -545,6 +561,7 @@ function ExternalModelSelectorBase({
                           efforts.find((o) => o.id === 'high')?.id ?? efforts[0]?.id ?? null
                       }
                       if (efforts && efforts.length === 0) nextReasoning = null
+                      if (modelIncludesEffort(agentRuntime.externalAgentId, model.id, model.label)) nextReasoning = null
                       onModelChange(model.id, nextReasoning)
                       setOpen(false)
                     }}

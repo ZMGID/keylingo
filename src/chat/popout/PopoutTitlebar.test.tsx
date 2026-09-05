@@ -47,6 +47,7 @@ describe('PopoutTitlebar', () => {
     const title = container.querySelector('[data-popout-title]')
     expect(pills).toBeTruthy()
     expect(title?.textContent).toBe('商品图片批量生成工作流搭建')
+    expect(title).toHaveAttribute('data-tauri-drag-region')
     expect(Boolean(pills && title && (pills.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true)
   })
 })

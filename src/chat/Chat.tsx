@@ -31,6 +31,7 @@ import {
 import { ApprovalCard } from './ApprovalCard'
 import { AskUserBlock } from './AskUserBlock'
 import { ChatTitlebar } from './ChatTitlebar'
+import { withExternalModel } from './externalModelEffort'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import {
   beginConversationTransition,
@@ -4060,12 +4061,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleExternalModelChange = useCallback(async (model: string, reasoning?: string | null) => {
     // Route through handleRuntimeChange so the draft updates even before a conversation exists
     // (the draft is applied when the conversation is created on first send).
-    const next: AgentRuntimeConfig = {
-      ...activeAgentRuntime,
-      kind: 'external',
-      externalModel: model,
-      externalReasoning: reasoning ?? activeAgentRuntime.externalReasoning ?? null,
-    }
+    const next = withExternalModel(activeAgentRuntime, model, reasoning)
     await handleRuntimeChange(next)
   }, [activeAgentRuntime, handleRuntimeChange])
 
