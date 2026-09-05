@@ -132,6 +132,13 @@ pub async fn list_external_cli_slash_commands(
     let def = get_agent_def(agent_id).ok_or_else(|| format!("未知外部 Agent: {agent_id}"))?;
 
     // Cheap, dependency-free strategies first — no CLI availability check needed.
+    if def.slash_strategy == SlashStrategy::Antigravity {
+        return Ok((
+            true,
+            crate::external_agents::antigravity_slash::builtin_commands(),
+            None,
+        ));
+    }
     if def.slash_strategy == SlashStrategy::None {
         return Ok((
             false,
@@ -248,7 +255,9 @@ pub async fn list_external_cli_slash_commands(
             .await
             .unwrap_or_default()
         }
-        SlashStrategy::Dsh | SlashStrategy::None => unreachable!("cheap strategies handled above"),
+        SlashStrategy::Dsh | SlashStrategy::Antigravity | SlashStrategy::None => {
+            unreachable!("cheap strategies handled above")
+        }
     };
 
     // R1: cache the result even when empty (negative cache) so切会话/切 agent 不再每次重探。

@@ -35,6 +35,8 @@ function agentDisplayName(agentId: string): string {
       return 'Grok CLI'
     case 'dsh':
       return 'DeepSeek Harness'
+    case 'antigravity':
+      return 'Antigravity CLI'
     default:
       return agentId
   }

@@ -1,4 +1,5 @@
 pub mod ask_user;
+pub mod antigravity_slash;
 pub mod attachments;
 pub mod cc_switch;
 pub mod claude_todo;

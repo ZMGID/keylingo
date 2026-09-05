@@ -38,8 +38,28 @@ Permissions inherit the CLI configuration unless the user explicitly selects ano
 mode. Sign-in happens through an interactive `agy` terminal session.
 
 The input stream supports text only; image attachments use the existing file-path
-fallback. Runtime steering, native follow-up injection, approval RPCs, slash commands
+fallback. Runtime steering, native follow-up injection, approval RPCs
 and native-history import are not advertised by this adapter.
+
+## Slash commands
+
+The command menu is maintained in Kivio and ships with Kivio updates. Opening `/`
+returns the built-in catalog immediately without CLI discovery, binary resolution,
+or network access. `/help` describes this adapted catalog. It is not a copy of the
+full interactive-terminal command list.
+
+`/agents`, `/changelog`, `/config` (`/settings`), `/credits`, `/effort`, `/hooks`,
+`/model`, `/permissions`, `/skills`, and `/usage` (`/quota`) run as standalone
+`agy -p` reports. Stream flags and the conversation binding are removed; active
+model/effort flags are retained. Configuration reports are read-only: model, effort,
+and permission changes use the existing Kivio controls. Report errors do not close
+the native session; cancellation terminates the report subprocess.
+
+User-invoked `/skills` lists the CLI's currently loaded skills. `/skill-name args`
+passes through the native NDJSON session for agy to expand. Workspace-dependent
+skill names are not hardcoded into the built-in menu. Terminal-only commands return
+an explanation without destroying the session. The live test checks reports and
+skill passthrough between ordinary turns, preserving recall, then cancel/resume.
 
 ## Verification
 
