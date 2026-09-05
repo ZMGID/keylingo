@@ -1,8 +1,8 @@
 import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
-import type { Components, UrlTransform } from 'streamdown'
-import { defaultRemarkPlugins, Streamdown } from 'streamdown'
+import type { BlockProps, Components, UrlTransform } from 'streamdown'
+import { Block, defaultRemarkPlugins, Streamdown } from 'streamdown'
 import type { PluggableList } from 'unified'
 import { cjk } from '@streamdown/cjk'
 import { code } from '@streamdown/code'
@@ -1103,6 +1103,21 @@ const streamdownRemarkPlugins: PluggableList = [
   remarkBreaks,
 ]
 
+// Streamdown 2.5 can leave a block stale after a non-prefix replacement. Scope
+// that recovery to the affected block: resetting the entire document also
+// destroys unchanged code, math, image and preview state on every correction.
+const ChatMarkdownBlock = memo(function ChatMarkdownBlock(props: BlockProps) {
+  const previousContentRef = useRef(props.content)
+  const revisionRef = useRef(0)
+  const previous = previousContentRef.current
+  if (typeof previous === 'string' && previous
+    && typeof props.content === 'string' && !props.content.startsWith(previous)) {
+    revisionRef.current += 1
+  }
+  previousContentRef.current = props.content
+  return <Block key={revisionRef.current} {...props} />
+})
+
 const FullSettledMarkdown = memo(function FullSettledMarkdown({
   content,
   components,
@@ -1128,20 +1143,7 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
       : build().normalized
   }, [content, useCache])
 
-  // Streamdown streaming 模式对「非前缀扩展」的整段替换可能卡住旧块（如 frame 0→frame 1）。
-  // 真实流式几乎总是前缀增长；一旦不是，换 key 强制重挂，避免 DOM 停在旧正文。
-  // 现在落库后也留在 streaming 模式，所以非流式期间的整段替换（编辑 / 重新生成落库）
-  // 同样要换 key —— 判据只看内容是否前缀增长，不看 streaming 上下文。
-  const streamEpochRef = useRef(0)
-  const prevStreamContentRef = useRef(content)
-  {
-    const prev = prevStreamContentRef.current
-    if (prev && content !== prev && !content.startsWith(prev)) {
-      streamEpochRef.current += 1
-    }
-    prevStreamContentRef.current = content
-  }
-  const streamEpoch = streamEpochRef.current
+  // Keep the document mounted; non-prefix replacement recovery is block-local.
 
   // 对齐 LiveAgent Markdown：
   // - 流式消息固定走 Streamdown streaming 模式（块级 memo + parseIncomplete），
@@ -1156,8 +1158,8 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
   //   （块级 memo，成本与流式末帧一致），对 react-markdown 来说每块都是完整文档，可接受。
   return (
     <Streamdown
-      key={`stream-${streamEpoch}`}
       mode="streaming"
+      BlockComponent={ChatMarkdownBlock}
       // ⚠️ 不传 dir。Streamdown 一旦拿到 dir（含 "auto"），streaming 模式会把**每个块**包进
       // `<div dir style="display:contents">`，而 static 模式直接平铺元素。根上的 `space-y-4`
       // 与 `[&>*:first-child]:mt-0` 打在 display:contents 包装层上是无效的（它不生成盒子），

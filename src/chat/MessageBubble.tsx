@@ -630,7 +630,6 @@ function renderProcessSegments({
   artifacts,
   citations,
   conversationId,
-  messageStreaming,
   reasoningStreaming,
   reasoningDurationMs,
   reasoningDurationMsBySegmentId,
@@ -641,7 +640,6 @@ function renderProcessSegments({
   artifacts: ChatToolArtifact[]
   citations?: Map<number, CitationView>
   conversationId?: string | null
-  messageStreaming: boolean
   reasoningStreaming: boolean
   reasoningDurationMs?: number | null
   reasoningDurationMsBySegmentId?: Record<string, number>
@@ -665,7 +663,7 @@ function renderProcessSegments({
           end += 1
         }
         nodes.push(
-          <div key={segment.id} className={messageStreaming ? 'chat-motion-fade' : undefined}>
+          <div key={segment.id}>
             <ToolCallErrorBoundary>
               <ImageReadCluster toolCalls={imageReads} />
             </ToolCallErrorBoundary>
@@ -676,7 +674,7 @@ function renderProcessSegments({
       }
     }
     nodes.push(
-      <div key={segment.id} className={messageStreaming ? 'chat-motion-fade' : undefined}>
+      <div key={segment.id}>
         <TimelineSegmentNode
           segment={segment}
           index={index}
@@ -799,16 +797,14 @@ function TimelineGroupBlock({
       {renderDetails && (
         <div className="chat-motion-reveal is-open" aria-hidden={false}>
           <div className="space-y-1.5">
-            {/* 段级淡入只在流式中播：历史消息被虚拟列表反复卸载/重挂载，无条件的
-                `both` fill 动画会让回翻时每个重进 DOM 的段落整批重播淡入——外层气泡
-                入场早已为此 gate（playEntranceAnimation），内层段落同理。 */}
+            {/* A new tool can move existing commentary into this group. Keep
+                those segments visible instead of replaying opacity from zero. */}
             {renderProcessSegments({
               segments,
               toolCallById,
               artifacts,
               citations,
               conversationId,
-              messageStreaming,
               reasoningStreaming: reasoningStreaming && isLastGroup,
               reasoningDurationMs,
               reasoningDurationMsBySegmentId,
@@ -888,9 +884,10 @@ function TimelineSegments({
       {groupItems.map((item: TimelineGroupItem, index) => {
         if (item.type === 'text') {
           if (!segmentText(item.segment).trim()) return null
-          // 每个时间线分段单独淡入：流式中新分段顺次出现而非"啪"地弹出。
+          // Segments can be regrouped as tools arrive; entrance fades would
+          // briefly hide text the user has already read.
           return (
-            <div key={item.segment.id} className={messageStreaming ? 'chat-motion-fade' : undefined}>
+            <div key={item.segment.id}>
               <TimelineTextSegment
                 segment={item.segment}
                 artifacts={artifacts}
@@ -906,7 +903,7 @@ function TimelineSegments({
           const toolCall = toolCallById.get(id)
           if (!toolCall) return null
           return (
-            <div key={item.segment.id} className={messageStreaming ? 'chat-motion-fade' : undefined}>
+            <div key={item.segment.id}>
               {isUserInjectedToolCall(toolCall) ? (
                 <UserSteerSegment toolCall={toolCall} />
               ) : isArtifactPresentationToolCall(toolCall) ? (
@@ -925,7 +922,7 @@ function TimelineSegments({
         }
         const groupKey = item.segments[0]?.id ?? `group-${index}`
         return (
-          <div key={groupKey} className={messageStreaming ? 'chat-motion-fade' : undefined}>
+          <div key={groupKey}>
             <TimelineGroupBlock
               segments={item.segments}
               toolCalls={toolCalls}
@@ -947,7 +944,6 @@ function TimelineSegments({
         toolCalls={orphanTools}
         artifacts={artifacts}
         conversationId={conversationId}
-        itemClassName={messageStreaming ? 'chat-motion-fade' : undefined}
       />
     </section>
   )
@@ -1248,7 +1244,7 @@ function MessageBubbleComponent({
 
         {Boolean((message.reasoning ?? '').trim()) && !hasTimelineSegments && (
           <ReasoningBlock
-            reasoning={message.reasoning}
+            reasoning={message.reasoning ?? ''}
             streaming={reasoningStreaming}
             durationMs={reasoningDurationMs}
           />

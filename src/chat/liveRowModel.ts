@@ -3,11 +3,11 @@
  *
  * Assign a stable virtualizer row key at run start (`live-turn-N` /
  * `live-group-<id>`). On settle, alias the committed twin onto that key so the
- * first history mount reuses the live estimate/cache identity.
+ * committed row reuses the live estimate/cache and React identity.
  *
- * Live rides outside the virtualizer; key continuity stabilizes the twin's
- * first history mount, not DOM reuse. Pure and DOM-free — MessageList feeds
- * run/history facts each render.
+ * Live rides outside the virtualizer's measurements, but shares a keyed parent
+ * with historical rows so visible content survives the handoff. Pure and
+ * DOM-free — MessageList feeds run/history facts each render.
  */
 
 export type LiveRowSyncInput = {

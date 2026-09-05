@@ -267,14 +267,14 @@ function MessageListBase({
   ), [liveGroupColumns, liveGroupId, liveGroupModelsKey])
   const streaming = coarse.streaming
   const streamFrozen = coarse.streamFrozen
-  // live → 历史 的同帧：先开短窗 eager，再让本帧新挂的 DeferredCodeBlock 读到 flag。
-  // 必须在 render 期同步调用，useEffect 会晚一帧，首挂仍走 180ms 延迟。
+  // The live subtree survives commit. Hydration notifications belong in layout,
+  // before paint, rather than notifying mounted islands during another render.
   const liveRowActive = streaming || streamFrozen
   const prevLiveRowActiveRef = useRef(liveRowActive)
   const liveEndingThisFrame = prevLiveRowActiveRef.current && !liveRowActive
-  if (liveEndingThisFrame) {
-    beginStreamSettleEagerHydrate()
-  }
+  useLayoutEffect(() => {
+    if (liveEndingThisFrame) beginStreamSettleEagerHydrate()
+  }, [liveEndingThisFrame])
   prevLiveRowActiveRef.current = liveRowActive
   // Last measured outside-live height; filled every streaming layout, consumed on settle seed.
   const liveBubbleHeightRef = useRef(0)
@@ -310,9 +310,8 @@ function MessageListBase({
     return messages.filter((message) => !activeMessageIds.has(message.id))
   }, [liveGroup, messages, snapshot.messageId, streamFrozen, streaming])
 
-  // Stable live keys for the in-list experiment + twin estimate identity on settle.
-  // Default external path still aliases so the history twin reuses the live key
-  // for measurement cache continuity (DOM is not reused across the outside→inside handoff).
+  // A committed answer adopts its live key for both measurements and React
+  // identity. Live and historical rows share a parent in renderTail below.
   const liveRowModelRef = useRef(createLiveRowModel())
   const liveRowModelConversationRef = useRef<string | null | undefined>(conversationId)
   if (liveRowModelConversationRef.current !== conversationId) {
@@ -2028,17 +2027,35 @@ function MessageListBase({
     ],
   )
 
-  const renderTail = useCallback(() => (
+  // Historical rows stay absolutely positioned; live growth stays in normal
+  // flow outside the virtualizer's measurements. Both use ONE keyed sibling
+  // array and parent, so committing only changes position/props, never mounts
+  // a replacement MessageBubble/MessageGroup. The spacer preserves the original
+  // history + live + chrome geometry, including the send reserve.
+  const visibleRows = virtualItems.flatMap((virtualItem) => {
+    const item = itemAt(virtualItem.index)
+    return item ? [{ item, virtualItem }] : []
+  })
+  const rows: Array<{ item: RenderItem; virtualItem?: (typeof virtualItems)[number] }> = visibleRows
+  if (dynamicItem) rows.push({ item: dynamicItem })
+
+  const renderTail = () => (
     <div ref={tailWrapRef}>
-      {dynamicItem && (
+      {rows.map(({ item, virtualItem }) => (
         <div
-          className="pb-0.5"
-          data-chat-message-list-item={dynamicItem.kind}
-          data-message-id={dynamicItem.kind === 'streaming' ? dynamicItem.message.id : undefined}
+          key={`${conversationId ?? 'empty'}:${item.key}`}
+          ref={virtualItem && import.meta.env.MODE !== 'test' ? virtualizer.measureElement : undefined}
+          data-index={virtualItem?.index}
+          data-chat-item-key={virtualItem ? measurementKey(item) : undefined}
+          data-chat-row-index={virtualItem?.index}
+          data-message-id={item.kind === 'message' || item.kind === 'streaming' ? item.message.id : undefined}
+          data-chat-message-list-item={item.kind}
+          className={virtualItem ? 'absolute left-0 top-0 w-full pb-0.5' : 'w-full pb-0.5'}
+          style={virtualItem ? { transform: `translateY(${virtualItem.start}px)` } : undefined}
         >
-          {renderItem(dynamicItem)}
+          {renderItem(item)}
         </div>
-      )}
+      ))}
       {errorItem && (
         <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
           {renderItem(errorItem)}
@@ -2049,7 +2066,7 @@ function MessageListBase({
       )}
       <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
     </div>
-  ), [dynamicItem, errorItem, lang, liveGroup, messages.length, renderItem, streaming, streamFrozen])
+  )
 
   return (
     <div className={`relative flex min-h-0 flex-1 flex-col ${navigatorTurnCount >= 4 ? 'has-message-navigator' : ''}`}>
@@ -2071,38 +2088,11 @@ function MessageListBase({
 
       >
         <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
-          <div
-            className="relative w-full"
-            style={{ height: virtualizer.getTotalSize() }}
-          >
-            {virtualItems.map((virtualItem) => {
-              const item = itemAt(virtualItem.index)
-              if (!item) return null
-              const messageId = item.kind === 'message'
-                ? item.message.id
-                : item.kind === 'streaming'
-                  ? item.message.id
-                  : undefined
-              return (
-                <div
-                  key={virtualItem.key}
-                  ref={import.meta.env.MODE === 'test' ? undefined : virtualizer.measureElement}
-                  data-index={virtualItem.index}
-                  data-chat-item-key={measurementKey(item)}
-                  data-chat-row-index={virtualItem.index}
-                  data-message-id={messageId}
-                  data-chat-message-list-item={item.kind}
-                  className="absolute left-0 top-0 w-full pb-0.5"
-                  style={{ transform: `translateY(${virtualItem.start}px)` }}
-                >
-                  {renderItem(item)}
-                </div>
-              )
-            })}
-          </div>
-          {/* Chrome always outside: live + status/error/send-reserve. */}
-          <div data-chat-message-list-item="tail" className="w-full pb-0.5">
-            {renderTail()}
+          <div className="relative w-full">
+            <div aria-hidden="true" style={{ height: virtualizer.getTotalSize() }} />
+            <div data-chat-message-list-item="tail" className="w-full pb-0.5">
+              {renderTail()}
+            </div>
           </div>
         </div>
       </div>

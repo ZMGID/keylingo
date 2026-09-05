@@ -13,6 +13,7 @@ import { createEmptyStreamSnapshot } from './conversationRuns'
 import type { ConversationStreamSnapshot } from './conversationRuns'
 import type { ChatMessage } from './types'
 import * as messageNavigator from './messageNavigator'
+import { beginGroup, endGroup, resetGroups } from './groupStreamingStore'
 
 // 真实集成：挂载真 MessageList（订阅真 streamingStore），按 Chat 各 helper 的调用方式驱动 store，
 // 验证「流式更新只重渲订阅者、不波及兄弟节点」这一核心收益，以及各 helper→store 映射的渲染结果。
@@ -32,6 +33,7 @@ async function flush() {
 afterEach(() => {
   vi.restoreAllMocks()
   act(() => {
+    resetGroups()
     reset()
     setCoarse({ streaming: false, streamFrozen: false, cancelling: false, streamError: '' })
   })
@@ -65,6 +67,81 @@ function message(id: number): ChatMessage {
 }
 
 describe('MessageList ← streamingStore 集成', () => {
+  it('preserves the selected model and its content when a live group commits', async () => {
+    const conversationId = 'group-continuity'
+    const user: ChatMessage = { id: 'group-user', role: 'user', content: 'question', timestamp: 1, group_id: 'g1' }
+    const answers: ChatMessage[] = ['first', 'second'].map((model) => ({
+      id: `${model}-answer`, role: 'assistant', content: `Answer from ${model}`, model,
+      provider_id: 'provider', group_id: 'g1', timestamp: 2,
+    }))
+    act(() => {
+      beginGroup(conversationId, 'g1', answers.map((answer) => ({
+        messageId: answer.id, providerId: 'provider', model: answer.model!, content: answer.content,
+      })))
+      setCoarse({ streaming: true, streamFrozen: false })
+    })
+    const { container, rerender } = render(<MessageList messages={[user]} conversationId={conversationId} />)
+    await flush()
+    fireEvent.click(screen.getByRole('button', { name: /^second$/ }))
+    const row = container.querySelector('[data-chat-message-list-item="live-group"]')
+    const markdown = row?.querySelector('.chat-markdown')
+    expect(markdown?.textContent).toContain('Answer from second')
+    rerender(<MessageList messages={[user, ...answers]} conversationId={conversationId} />)
+    await flush()
+    act(() => { endGroup(conversationId); reset() })
+    await flush()
+    const committed = container.querySelector('[data-chat-message-list-item="group"]')
+    expect(committed).toBe(row)
+    expect(committed?.querySelector('.chat-markdown')).toBe(markdown)
+    expect(screen.getByText('Answer from second')).toBeInTheDocument()
+    expect(screen.queryByText('Answer from first')).not.toBeInTheDocument()
+  })
+
+  it('keeps the live row, markdown and user-expanded process mounted through freeze and commit', async () => {
+    const user: ChatMessage = { id: 'continuous-user', role: 'user', content: 'question', timestamp: 1 }
+    const content = '## Answer\n\nA **stable** answer.\n\n```ts\nconst answer = 42\n```'
+    const segments = [
+      { id: 'reasoning-1', kind: 'reasoning' as const, phase: 'plain' as const, order: 0, text: 'Inspecting the implementation.' },
+      { id: 'answer-1', kind: 'text' as const, phase: 'plain' as const, order: 1, text: content },
+    ]
+    const assistant: ChatMessage = { id: 'continuous-answer', role: 'assistant', content, segments, timestamp: 2 }
+    act(() => {
+      setSnapshot(snapWith({ messageId: assistant.id, content, segments, streaming: true }))
+      setCoarse({ streaming: true, streamFrozen: false })
+    })
+    const { container, rerender } = render(<MessageList messages={[user]} conversationId="continuous-c1" />)
+    await flush()
+    const row = container.querySelector(`[data-message-id="${assistant.id}"]`)
+    const markdown = row?.querySelector('.chat-markdown')
+    const code = row?.querySelector('figure pre code')
+    const process = screen.getByRole('region', { name: '过程分组' })
+    const toggle = process.querySelector('button')!
+    // Make this an explicit user choice, which must survive the handoff.
+    if (toggle.getAttribute('aria-expanded') === 'true') fireEvent.click(toggle)
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(code?.textContent).toContain('const answer = 42')
+
+    act(() => {
+      patchSnapshot({ streaming: false, reasoningStreaming: false })
+      setCoarse({ streaming: false, streamFrozen: true })
+    })
+    await flush()
+    expect(container.querySelector(`[data-message-id="${assistant.id}"]`)).toBe(row)
+    rerender(<MessageList messages={[user, assistant]} conversationId="continuous-c1" />)
+    await flush()
+    act(() => reset())
+    await flush()
+
+    const committed = container.querySelector(`[data-message-id="${assistant.id}"]`)
+    expect(committed).toBe(row)
+    expect(committed?.querySelector('.chat-markdown')).toBe(markdown)
+    expect(committed?.querySelector('figure pre code')).toBe(code)
+    expect(toggle).toBeInTheDocument()
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(container.querySelectorAll(`[data-message-id="${assistant.id}"]`)).toHaveLength(1)
+  })
+
   it('does not render a detached global agent plan row', async () => {
     const onExecute = vi.fn()
     render(

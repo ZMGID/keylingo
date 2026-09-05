@@ -15,6 +15,47 @@ import {
 } from './messageNavigationStore'
 
 describe('ChatMarkdown streaming stability', () => {
+  it('preserves links and loaded images when artifacts update during streaming and commit', async () => {
+    const content = '[source](https://example.com)\n\n![chart](chart.png)'
+    const artifact = { name: 'chart.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,AAAA' }
+    const view = (streaming: boolean, tail: string) => (
+      <MarkdownStreamingContext.Provider value={streaming}>
+        <ChatMarkdown content={`${content}\n\n${tail}`} artifacts={[{ ...artifact }]} />
+      </MarkdownStreamingContext.Provider>
+    )
+    const { container, rerender } = render(view(true, 'frame 0'))
+    await act(async () => { await Promise.resolve() })
+    const link = container.querySelector('a')
+    const image = container.querySelector('img')
+    expect(link).not.toBeNull()
+    expect(image).not.toBeNull()
+    for (const streaming of [true, false]) {
+      rerender(view(streaming, `frame ${streaming ? 1 : 2}`))
+      await act(async () => { await Promise.resolve() })
+      expect(container.querySelector('a')).toBe(link)
+      expect(container.querySelector('img')).toBe(image)
+    }
+  })
+
+  it.each([true, false])('updates revised text without remounting unchanged blocks (streaming=%s)', async (streaming) => {
+    const view = (tail: string) => (
+      <MarkdownStreamingContext.Provider value={streaming}>
+        <ChatMarkdown content={`## Stable heading\n\n${tail}`} />
+      </MarkdownStreamingContext.Provider>
+    )
+    const { container, rerender } = render(view('frame 0'))
+    await act(async () => { await Promise.resolve() })
+    const heading = container.querySelector('h2')
+    expect(heading).not.toBeNull()
+    for (const tail of ['frame 1', 'replacement **body**', 'short', '', 'final body']) {
+      rerender(view(tail))
+      await act(async () => { await Promise.resolve() })
+      expect(container.querySelector('h2')).toBe(heading)
+      expect(container.textContent).toContain(tail.replaceAll('**', ''))
+      expect(container.textContent).not.toContain('frame 0')
+    }
+  })
+
   afterEach(() => {
     const { requestId } = getConversationTransitionSnapshot()
     if (requestId > 0) cancelConversationTransition(requestId)
