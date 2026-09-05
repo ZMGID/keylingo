@@ -2087,7 +2087,8 @@ mod tests {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Path::new(&format!("/proc/{pid}")).exists()
+            // macOS has no /proc filesystem. Probe without sending a signal.
+            (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
         }
     }
 
