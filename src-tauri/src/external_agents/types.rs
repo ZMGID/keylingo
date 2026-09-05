@@ -53,6 +53,8 @@ pub enum SlashStrategy {
     /// Discover via `session/commands` (`ctx.commands.list`) after the kivio
     /// profile mounts. Builtins are only the pre-connect fallback.
     Dsh,
+    /// Kivio-maintained builtins, with standalone reports and native skill passthrough.
+    Antigravity,
     /// No discoverable slash commands for this CLI in headless mode.
     None,
 }

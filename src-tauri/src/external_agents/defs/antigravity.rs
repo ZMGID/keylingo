@@ -60,7 +60,7 @@ pub const ANTIGRAVITY_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     models_from_stderr: false,
     model_probe: None,
     model_probe_args: None,
-    slash_strategy: SlashStrategy::None,
+    slash_strategy: SlashStrategy::Antigravity,
     env: &[],
     max_prompt_arg_bytes: None,
     prompt_via_stdin: true,

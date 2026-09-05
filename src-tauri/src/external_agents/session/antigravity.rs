@@ -2,7 +2,7 @@
 //! https://antigravity.google/docs/cli/headless/
 //! One init per process, one result per turn. No control RPCs or native image blocks.
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -234,6 +234,9 @@ impl TurnStream {
 }
 
 pub struct AntigravitySession {
+    bin: PathBuf,
+    cwd: PathBuf,
+    args: Vec<String>,
     child: Child,
     stdin: ChildStdin,
     reader: Lines<BufReader<ChildStdout>>,
@@ -303,6 +306,9 @@ impl AntigravitySession {
             }
         });
         let mut session = Self {
+            bin: bin.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+            args: args.to_vec(),
             child,
             stdin,
             reader: BufReader::new(stdout).lines(),
@@ -367,11 +373,57 @@ impl AntigravitySession {
         events: &mpsc::Sender<UnifiedAgentEvent>,
         commands: &mut mpsc::Receiver<SessionCommand>,
     ) -> Result<(), String> {
-        // Built-in slash commands emit non-protocol reports and can terminate this session.
-        if prompt.trim_start().starts_with('/') {
-            return Err(
-                "Antigravity 流式会话暂不支持斜杠命令，请使用模型/权限设置或原生终端。".into(),
-            );
+        use crate::external_agents::antigravity_slash::{
+            command_name, is_report, is_terminal_only, report,
+        };
+        if let Some(name) = command_name(prompt) {
+            let has_args = prompt.trim().split_whitespace().count() > 1;
+            if is_terminal_only(name) || (is_report(name) && has_args) {
+                let message = if is_report(name) {
+                    format!("/{name} 当前适配为只读查询，请不带参数执行。模型、推理强度和权限可在会话菜单中修改；其他配置请在 agy 原生终端中修改。")
+                } else {
+                    format!("/{name} 需要 Antigravity 交互式终端，当前流式协议没有对应接口。输入 /help 可查看已适配命令。")
+                };
+                let _ = events
+                    .send(UnifiedAgentEvent::TextDelta { delta: message })
+                    .await;
+                return Ok(());
+            }
+            if is_report(name) {
+                if name == "help" {
+                    let _ = events
+                        .send(UnifiedAgentEvent::TextDelta {
+                            delta: crate::external_agents::antigravity_slash::help_text(),
+                        })
+                        .await;
+                    return Ok(());
+                }
+                // A failed report must not close the native conversation. Cancel/Close
+                // still cancels the subprocess future (kill_on_drop) and the session.
+                let pending = report(&self.bin, &self.cwd, &self.args, prompt);
+                tokio::pin!(pending);
+                let result = loop {
+                    tokio::select! {
+                        result = &mut pending => break result,
+                        command = commands.recv() => match command {
+                            Some(SessionCommand::Steer { accepted, .. }) => { let _ = accepted.send(false); }
+                            Some(SessionCommand::StopTask { .. }) => {}
+                            _ => return Err(CANCELLED_SESSION_LOST.into()),
+                        }
+                    }
+                };
+                let text = match result {
+                    Ok(text) if !text.is_empty() => text,
+                    Ok(_) => "命令已完成，没有返回内容。".into(),
+                    Err(error) => format!("命令执行失败：{error}"),
+                };
+                let _ = events
+                    .send(UnifiedAgentEvent::TextDelta { delta: text })
+                    .await;
+                return Ok(());
+            }
+            // Skill slash commands are expanded by agy, preserving native arguments
+            // and the existing conversation. Do not prepend Kivio instructions.
         }
         let line = format!("{}\n", json!({"event":"user","message":{"content":prompt}}));
         self.stdin
@@ -562,6 +614,29 @@ mod tests {
             .await
         )
         .contains("OK"));
+        let catalog = crate::external_agents::antigravity_slash::builtin_commands();
+        assert!(catalog.iter().any(|command| command.name == "usage"));
+        let report = ask(&control, "/help").await;
+        assert!(text(&report).contains("/usage"));
+        assert!(!report
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Usage { .. })));
+        assert!(text(&ask(&control, "/model low").await).contains("只读"));
+        assert!(text(&ask(&control, "/clear").await).contains("交互式终端"));
+        let skills = text(&ask(&control, "/skills").await);
+        if skills
+            .lines()
+            .any(|line| line.starts_with("antigravity-guide\t"))
+        {
+            assert!(text(
+                &ask(
+                    &control,
+                    "/antigravity-guide Reply with exactly AGY_SLASH_OK. Do not use tools."
+                )
+                .await
+            )
+            .contains("AGY_SLASH_OK"));
+        }
         assert!(text(
             &ask(
                 &control,
