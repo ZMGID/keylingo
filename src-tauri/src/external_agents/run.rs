@@ -322,7 +322,11 @@ pub async fn run_external_cli_reply(
             .filter(|path| !path.trim().is_empty())
             .collect(),
     );
-    let additional_dirs_key = additional_cli_dirs.join("\n");
+    let additional_dirs_key = if agent_id == "antigravity" {
+        extra_dirs.join("\n")
+    } else {
+        additional_cli_dirs.join("\n")
+    };
     let runtime_ctx = RuntimeContext {
         extra_allowed_dirs: extra_dirs,
         resume_session_id: resume_ctx.resume_session_id.clone(),
@@ -402,6 +406,7 @@ pub async fn run_external_cli_reply(
             | StreamFormat::AcpJsonRpc
             | StreamFormat::DshJsonRpc
             | StreamFormat::PiRpc
+            | StreamFormat::AntigravityStreamJson
     );
     let mut spawned_opt = if persistent {
         None
@@ -692,10 +697,13 @@ pub async fn run_external_cli_reply(
         }
     }
 
-    let actual_native_session_id = matches!(def.stream_format, StreamFormat::PiRpc)
-        .then(|| crate::external_agents::session::load_live_handle(app, &conversation_id))
-        .flatten()
-        .map(|handle| handle.native_id);
+    let actual_native_session_id = matches!(
+        def.stream_format,
+        StreamFormat::PiRpc | StreamFormat::AntigravityStreamJson
+    )
+    .then(|| crate::external_agents::session::load_live_handle(app, &conversation_id))
+    .flatten()
+    .map(|handle| handle.native_id);
     persist_delivered_session(
         app,
         &conversation_id,
@@ -1283,6 +1291,20 @@ fn launch_config_for_turn(
             instructions: None,
         };
     }
+    if matches!(protocol, StreamFormat::AntigravityStreamJson) {
+        let env: std::collections::BTreeMap<_, _> =
+            crate::external_agents::overrides::env_for("antigravity")
+                .into_iter()
+                .collect();
+        let env_hash = crate::external_agents::session::stable_prompt_hash(
+            &serde_json::to_string(&env).unwrap_or_default(),
+        );
+        return LaunchConfig {
+            flags: serde_json::json!([model, reasoning, sandbox, additional_dirs_key, env_hash])
+                .to_string(),
+            instructions: None,
+        };
+    }
     if matches!(protocol, StreamFormat::PiRpc) {
         return LaunchConfig::for_pi(model, reasoning);
     }
@@ -1351,9 +1373,10 @@ fn persistent_turn_prompt<'a>(
     latest_user_message: &'a str,
 ) -> &'a str {
     match protocol {
-        StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc | StreamFormat::PiRpc => {
-            composed_prompt
-        }
+        StreamFormat::ClaudeStreamJson
+        | StreamFormat::DshJsonRpc
+        | StreamFormat::PiRpc
+        | StreamFormat::AntigravityStreamJson => composed_prompt,
         _ => latest_user_message,
     }
 }
@@ -1432,6 +1455,11 @@ fn persistent_failure_action(
             PersistentFailureAction::ReconnectWithoutResume
         };
     }
+    // agy has no request ids or prompt acknowledgement. Replaying a failed in-flight
+    // turn could execute tools twice. Preserve the binding and let the user retry.
+    if agent_id == "antigravity" {
+        return PersistentFailureAction::Fatal;
+    }
     // Auth is never auto-retried (a doomed retry could trigger a login storm).
     if crate::external_agents::errors::is_auth_error(err, agent_id) {
         return PersistentFailureAction::Fatal;
@@ -1465,7 +1493,7 @@ fn is_missing_resume_target(err: &str, agent_id: &str) -> bool {
         Some(StreamFormat::AcpJsonRpc) => {
             crate::external_agents::session::acp::is_missing_acp_session_error(err)
         }
-        None => false,
+        Some(StreamFormat::AntigravityStreamJson) | None => false,
     }
 }
 
@@ -1971,6 +1999,7 @@ fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
         StreamFormat::AcpJsonRpc => "acp_json_rpc",
         StreamFormat::PiRpc => "pi_rpc",
         StreamFormat::DshJsonRpc => "dsh_json_rpc",
+        StreamFormat::AntigravityStreamJson => "antigravity_stream_json",
     }
 }
 
@@ -2409,6 +2438,22 @@ async fn connect_persistent_session(
     };
 
     match protocol {
+        StreamFormat::AntigravityStreamJson => {
+            use crate::external_agents::session::antigravity::{
+                spawn_antigravity_session_actor, AntigravitySession,
+            };
+            let session =
+                AntigravitySession::connect(resolved_bin, args, cwd, resume_native.as_deref())
+                    .await?;
+            let native_id = session.session_id().to_string();
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_antigravity_session_actor(session),
+                native_id,
+                resumed: resume_native.is_some(),
+                child_pid,
+            })
+        }
         StreamFormat::ClaudeStreamJson => {
             // claude 的会话 id 走**启动参数**，不像 codex / ACP 在握手 RPC 里传 ——
             // 所以这里要看/改 argv 而不是传参。
@@ -3397,6 +3442,47 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_preserves_turn_context_and_restarts_for_launch_changes() {
+        let protocol = StreamFormat::AntigravityStreamJson;
+        let original =
+            launch_config_for_turn(protocol, Some("a"), Some("low"), None, None, None, "dir");
+        for (model, effort, sandbox, dirs) in [
+            (Some("b"), Some("low"), None, "dir"),
+            (Some("a"), Some("high"), None, "dir"),
+            (Some("a"), Some("low"), Some("plan"), "dir"),
+            (Some("a"), Some("low"), None, "new-dir"),
+        ] {
+            assert!(!original.accepts(&launch_config_for_turn(
+                protocol, model, effort, sandbox, None, None, dirs
+            )));
+        }
+        assert_eq!(
+            persistent_turn_prompt(protocol, "skill + attachment + message", "message"),
+            "skill + attachment + message"
+        );
+        assert!(!cancel_keeps_live_session("cancelled", protocol));
+        assert_eq!(
+            persistent_failure_action(
+                "EOF after tool execution",
+                "antigravity",
+                false,
+                false,
+                false
+            ),
+            PersistentFailureAction::Fatal
+        );
+        assert_eq!(
+            persistent_failure_action(
+                crate::external_agents::session::live::CANCELLED_SESSION_LOST,
+                "antigravity",
+                false,
+                false,
+                false
+            ),
+            PersistentFailureAction::Cancelled
+        );
+    }
 
     /// 协议层自报的失败必须能到出口——修复前这里只打了一条日志，于是
     /// 「CLI 明确说本轮失败了」被整个吞掉（claude 未登录 ⇒ 空气泡 + 零提示）。

@@ -7,6 +7,7 @@ use crate::chat::model::ModelUsage;
 #[serde(rename_all = "snake_case")]
 pub enum StreamFormat {
     ClaudeStreamJson,
+    AntigravityStreamJson,
     PiRpc,
     AcpJsonRpc,
     CodexAppServer,

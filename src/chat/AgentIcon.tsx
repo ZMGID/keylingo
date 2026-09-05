@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import Antigravity from '@lobehub/icons/es/Antigravity/components/Color'
 
 const ICON_EXT: Record<string, 'svg'> = {
   claude: 'svg',
@@ -22,6 +23,9 @@ interface AgentIconProps {
 }
 
 export function AgentIcon({ id, size = 20, className }: AgentIconProps) {
+  if (id === 'antigravity') {
+    return <Antigravity size={size} className={className} aria-hidden="true" />
+  }
   const cls = ['agent-icon', className].filter(Boolean).join(' ')
   const ext = ICON_EXT[id]
   if (ext === 'svg' && MONO_ICONS.has(id)) {

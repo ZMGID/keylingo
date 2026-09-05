@@ -38,6 +38,16 @@ struct InstallSpec {
 
 fn install_spec(agent_id: &str) -> Option<InstallSpec> {
     let spec = match agent_id {
+        "antigravity" => InstallSpec {
+            npm_package: None,
+            npm_install_args: &[],
+            pypi_package: None,
+            script_unix: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+            script_windows: Some("irm https://antigravity.google/cli/install.ps1 | iex"),
+            update_args: Some(&["update"]),
+            docs: "https://antigravity.google/docs/cli/install/",
+            config_dir: Some(".gemini/antigravity-cli"),
+        },
         "claude" => InstallSpec {
             npm_package: Some("@anthropic-ai/claude-code"),
             npm_install_args: &[],
@@ -876,6 +886,22 @@ async fn latest_version(http: &reqwest::Client, spec: &InstallSpec) -> Option<St
     }
 }
 
+async fn antigravity_latest_version(http: &reqwest::Client) -> Option<String> {
+    let value: serde_json::Value = http
+        .get("https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest")
+        .header(reqwest::header::USER_AGENT, "Kivio")
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    extract_semver(value.get("tag_name")?.as_str()?)
+}
+
 /// `--version` 输出里抓语义化版本号：CLI 们的首行格式各不相同
 /// （`2.1.207 (Claude Code)` / `codex-cli 0.146.0` / 裸 `0.53.1` / `0.1.0-rc.7`）。
 /// 保留 prerelease（dsh 目前全是 rc），丢掉 `+build` metadata。
@@ -1056,7 +1082,11 @@ pub async fn chat_external_cli_install_info(
         .and_then(crate::external_agents::spawn::cached_cli_version)
         .as_deref()
         .and_then(extract_semver);
-    let latest_version = latest_version(&state.http, &spec).await;
+    let latest_version = if agent_id == "antigravity" {
+        antigravity_latest_version(&state.http).await
+    } else {
+        latest_version(&state.http, &spec).await
+    };
     let update_available = match (&local_version, &latest_version) {
         (Some(local), Some(latest)) => version_is_newer(local, latest),
         _ => false,
@@ -1283,6 +1313,21 @@ fn open_path(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_uses_official_native_installers_and_self_update() {
+        let spec = install_spec("antigravity").unwrap();
+        assert!(spec.npm_package.is_none());
+        assert!(install_plan(&spec, HostPlatform::Unix)
+            .unwrap()
+            .display
+            .contains("https://antigravity.google/cli/install.sh"));
+        assert!(install_plan(&spec, HostPlatform::Windows)
+            .unwrap()
+            .display
+            .contains("https://antigravity.google/cli/install.ps1"));
+        assert_eq!(spec.update_args, Some(&["update"][..]));
+        assert_eq!(spec.config_dir, Some(".gemini/antigravity-cli"));
+    }
 
     #[test]
     fn extract_semver_handles_each_cli_version_line() {
