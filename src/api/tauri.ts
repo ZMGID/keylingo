@@ -891,7 +891,16 @@ export type ModelInfo = {
 // AI 模型提供商配置
 // apiKeys 是密钥池；activeKeyIndex 是用户点选的当前 Key。
 // 鉴权/配额失败时后端仍会自动切到池里其它 Key。
+export type ProviderOAuthConfig = { provider: 'codex' | 'kimi' | 'antigravity'; credentialId?: string }
+export type ProviderOAuthLogin = { loginId: string; userCode: string; verificationUrl: string; interval: number; expiresAt: number }
+export type ProviderOAuthPoll = { status: 'pending' | 'authorized'; interval: number; auth: ProviderOAuthConfig | null }
+
+export function providerHasCredentials(provider: ModelProvider): boolean {
+  return provider.request?.oauth ? Boolean(provider.request.oauth.credentialId) : provider.apiKeys.some(key => key.trim() !== '')
+}
+
 export type ProviderRequestConfig = {
+  oauth?: ProviderOAuthConfig | null
   /** 附加到该供应商所有请求上的自定义头。同名时覆盖 CLI 身份预设。 */
   customHeaders?: { key: string; value: string }[]
   /** 是否跟随系统代理。默认 true；关掉走直连。 */
@@ -1479,6 +1488,7 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
     compressRequestBody: provider.compressRequestBody === true,
     apiFormat: normalizeProviderApiFormat(provider.apiFormat),
     request: {
+      oauth: provider.request?.oauth ?? null,
       customHeaders: Array.isArray(provider.request?.customHeaders)
         ? provider.request.customHeaders
         : [],
@@ -1657,7 +1667,7 @@ function isDefaultModelConfigured(selection: DefaultModelSelection): boolean {
 
 function providerHasUsableConfig(provider: ModelProvider): boolean {
   return provider.enabled !== false
-    && provider.apiKeys.some((key) => key.trim() !== '')
+    && providerHasCredentials(provider)
     && provider.enabledModels.length > 0
 }
 
@@ -1892,6 +1902,11 @@ async function onChatProtocol(
 // ========== API 导出 ==========
 
 export const api = {
+  providerOAuthStart: (provider: ProviderOAuthConfig['provider'], useSystemProxy = true) =>
+    invoke<ProviderOAuthLogin>('provider_oauth_start', { provider, useSystemProxy }),
+  providerOAuthPoll: (loginId: string) => invoke<ProviderOAuthPoll>('provider_oauth_poll', { loginId }),
+  providerOAuthCancel: (loginId: string) => invoke<void>('provider_oauth_cancel', { loginId }),
+  providerOAuthDisconnect: (credentialId: string) => invoke<void>('provider_oauth_disconnect', { credentialId }),
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),
   // 某模型可选的思考等级列表（用户覆盖 modelOverrides → 模型库 reasoningEfforts → 家族兜底）。

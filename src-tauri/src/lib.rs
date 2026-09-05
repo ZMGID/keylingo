@@ -24,6 +24,7 @@ pub mod plugins;
 pub mod proc;
 pub mod prompts;
 pub mod provider_request;
+pub mod provider_oauth;
 pub mod rapidocr;
 pub mod replace_translation;
 #[cfg(target_os = "macos")]
@@ -520,6 +521,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            provider_oauth::provider_oauth_start,
+            provider_oauth::provider_oauth_poll,
+            provider_oauth::provider_oauth_cancel,
+            provider_oauth::provider_oauth_disconnect,
             commands::get_settings,
             windows::chat_window_apply_mica,
             windows::chat_window_set_opaque,

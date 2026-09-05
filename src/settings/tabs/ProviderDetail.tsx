@@ -9,6 +9,7 @@ import { Button, IconButton } from '../../components/Button'
 import { ModelIcon } from '../../chat/ModelIcon'
 import { PROVIDER_PRESETS } from '../providerPresets'
 import { ProviderRequestPanel } from '../ProviderRequestPanel'
+import { ProviderOAuthPanel } from '../ProviderOAuthPanel'
 import { resolveModelInfo } from '../../data/modelMatching'
 import { api, normalizeProviderApiFormat, clampedActiveKeyIndex, activeKeyIndexAfterRemove } from '../../api/tauri'
 import type { I18n, Lang } from '../i18n'
@@ -75,11 +76,13 @@ export function ProviderDetail({
   return (
     <>
     <SettingsGroup title={lang === 'zh' ? '配置' : 'Configuration'}>
+      <ProviderOAuthPanel key={provider.id} provider={provider} lang={lang} onUpdateProvider={onUpdateProvider} />
       <FieldBlock label={t.baseUrl}>
         <div className="kv-provider-endpoint-row">
           <Input
             className="min-w-0 flex-1"
             value={provider.baseUrl}
+            disabled={Boolean(provider.request?.oauth)}
             onChange={(v) => onUpdateProvider(provider.id, { baseUrl: v })}
             placeholder="https://api.openai.com/v1"
             mono
@@ -87,6 +90,7 @@ export function ProviderDetail({
           <Select
             className="w-[11.5rem] shrink-0"
             value={normalizeProviderApiFormat(provider.apiFormat)}
+            disabled={Boolean(provider.request?.oauth)}
             onChange={(apiFormat) => onUpdateProvider(provider.id, { apiFormat })}
             options={[
               { value: 'openai_chat', label: 'OpenAI Chat' },
@@ -99,7 +103,7 @@ export function ProviderDetail({
         </div>
       </FieldBlock>
 
-      <FieldBlock label={t.apiKey} description={t.apiKeysHint}>
+      {!provider.request?.oauth && <FieldBlock label={t.apiKey} description={t.apiKeysHint}>
         <div className="space-y-1.5">
           {(() => {
             // 命中快速预设 baseUrl 时，给出「获取 API Key」外链引导用户申请。
@@ -193,7 +197,7 @@ export function ProviderDetail({
           <Plus size={11} />
           {t.addKey}
         </Button>
-      </FieldBlock>
+      </FieldBlock>}
 
       <div className="kv-row">
         <div className="kv-row-text">

@@ -472,6 +472,9 @@ impl AppState {
     /// 该供应商应当使用的 HTTP 客户端。默认跟随系统代理（与加这个开关之前一致），
     /// 关掉时用忽略代理的直连客户端。
     pub fn client_for(&self, provider: &crate::settings::ModelProvider) -> &Client {
+        if provider.request.oauth.is_some() {
+            return crate::provider_oauth::inference_client(provider.request.use_system_proxy);
+        }
         if provider.request.use_system_proxy {
             &self.http
         } else {

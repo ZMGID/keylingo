@@ -299,7 +299,7 @@ pub(crate) async fn translate_text(
         .get_provider(&settings.translator_provider_id)
         .ok_or_else(|| "Translator provider not found".to_string())?;
 
-    if provider.api_keys.is_empty() {
+    if !provider.has_credentials() {
         return Ok("Missing API Key".to_string());
     }
     if settings.translator_model.trim().is_empty() {
@@ -838,6 +838,18 @@ pub(crate) async fn fetch_models(
     provider: Option<ProviderConnectionInput>,
 ) -> Result<Vec<String>, String> {
     let settings = state.settings_read().clone();
+    let mut oauth_provider = effective_request_provider(&settings, &provider_id, provider.as_ref().and_then(|p| p.request.clone()));
+    if let Some(input) = provider.as_ref() {
+        if input.id.as_deref().is_some_and(|id| !id.is_empty() && id != provider_id) {
+            return Err("Provider ID mismatch".into());
+        }
+        oauth_provider.base_url = input.base_url.clone();
+        if let Some(format) = &input.api_format { oauth_provider.api_format = format.clone(); }
+    }
+    if oauth_provider.request.oauth.is_some() {
+        return crate::provider_oauth::models(&state, &oauth_provider).await;
+    }
+
     let api_format = resolve_api_format(&settings, &provider_id, provider.as_ref());
     let request_override = provider.as_ref().and_then(|p| p.request.clone());
     let preferred_idx = provider.as_ref().and_then(|p| p.active_key_index);
@@ -902,6 +914,23 @@ pub(crate) async fn test_provider_connection(
     provider: Option<ProviderConnectionInput>,
 ) -> Result<serde_json::Value, String> {
     let settings = state.settings_read().clone();
+    let mut oauth_provider = effective_request_provider(&settings, &provider_id, provider.as_ref().and_then(|p| p.request.clone()));
+    if let Some(input) = provider.as_ref() {
+        if input.id.as_deref().is_some_and(|id| !id.is_empty() && id != provider_id) {
+            return Err("Provider ID mismatch".into());
+        }
+        oauth_provider.base_url = input.base_url.clone();
+        if let Some(format) = &input.api_format { oauth_provider.api_format = format.clone(); }
+    }
+    if oauth_provider.request.oauth.is_some() {
+        let model = provider.as_ref().and_then(|p| p.model.as_deref()).filter(|m| !m.trim().is_empty());
+        let result = crate::provider_oauth::test_connection(&state, &oauth_provider, model).await;
+        return Ok(match result {
+            Ok(()) => serde_json::json!({"success": true}),
+            Err(error) => serde_json::json!({"success": false, "error": error}),
+        });
+    }
+
     let model = provider.as_ref().and_then(|p| p.model.clone());
     // 协议优先取前端传入（未保存的编辑中配置），缺省回退 settings 里已保存的。
     let api_format = resolve_api_format(&settings, &provider_id, provider.as_ref());

@@ -869,7 +869,7 @@ const mockChatApi = {
     return updated
   },
 
-  async optimizePrompt(text: string, _conversationId?: string | null): Promise<string> {
+  async optimizePrompt(text: string): Promise<string> {
     const trimmed = text.trim()
     if (!trimmed) throw new Error('先输入要优化的问题')
     if (trimmed.startsWith('/')) throw new Error('斜杠命令无需优化')
@@ -1829,7 +1829,7 @@ export const chatApi = {
   },
 
   async optimizePrompt(text: string, conversationId?: string | null): Promise<string> {
-    if (!isTauriRuntime()) return mockChatApi.optimizePrompt(text, conversationId)
+    if (!isTauriRuntime()) return mockChatApi.optimizePrompt(text)
     return invoke<string>('chat_optimize_prompt', {
       text,
       conversationId: conversationId ?? null,

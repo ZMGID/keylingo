@@ -851,7 +851,7 @@ fn call_advisor(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
         let Some(provider) = ctx.settings.get_provider(&provider_id).cloned() else {
             return Err("Advisor provider is missing or disabled.".to_string());
         };
-        if provider.api_keys.is_empty() {
+        if !provider.has_credentials() {
             return Err("Advisor provider has no API key configured.".to_string());
         }
 
