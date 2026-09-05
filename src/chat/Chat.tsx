@@ -4946,6 +4946,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     usesExternalRuntime,
     externalAgentName: activeAgentRuntime.externalAgentId ?? null,
     conversationId: currentConversation?.id ?? null,
+    inputHistory: currentConversation?.messages.filter((message) => message.role === 'user').map((message) => message.content),
     knowledgeBaseIds: composerKnowledgeBaseIds,
     onChangeKnowledgeBaseIds: handleChangeKnowledgeBaseIds,
     forceKnowledgeSearch: composerForceKnowledgeSearch,

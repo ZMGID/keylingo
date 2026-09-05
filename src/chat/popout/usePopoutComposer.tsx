@@ -673,6 +673,7 @@ export function usePopoutComposer({
     externalAgentName: runtime.externalAgentId ?? null,
     conversationId,
     knowledgeBaseIds: conversation?.knowledge_base_ids ?? conversation?.knowledgeBaseIds ?? [],
+    inputHistory: conversation?.messages.filter((message) => message.role === 'user').map((message) => message.content),
     onChangeKnowledgeBaseIds: handleChangeKnowledgeBaseIds,
     forceKnowledgeSearch: conversation?.force_knowledge_search ?? conversation?.forceKnowledgeSearch ?? false,
     onToggleForceKnowledgeSearch: handleToggleForceKnowledgeSearch,

@@ -28,6 +28,61 @@ function UnmountOnSend({ conversationId }: { conversationId: string }) {
 }
 
 describe('InputBar 发送清草稿', () => {
+  it('上下键遍历用户历史，跳过空文字并恢复未发送草稿', () => {
+    render(<InputBar onSend={() => {}} conversationId="history-draft" inputHistory={['第一条', '', '第二条']} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '未发送草稿' } })
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(textarea).toHaveValue('第二条')
+    expect(textarea.selectionStart).toBe(textarea.value.length)
+    expect(textarea.selectionEnd).toBe(textarea.value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(textarea).toHaveValue('第一条')
+    expect(textarea.selectionStart).toBe(textarea.value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(textarea).toHaveValue('第二条')
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(textarea).toHaveValue('未发送草稿')
+    expect(textarea.selectionStart).toBe(textarea.value.length)
+  })
+
+  it('多行正文、选区、修饰键和输入法不触发历史', () => {
+    render(<InputBar onSend={() => {}} conversationId="history-keys" inputHistory={['历史']} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '第一行\n第二行' } })
+    textarea.setSelectionRange(2, 2)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(textarea).toHaveValue('第一行\n第二行')
+    textarea.setSelectionRange(0, 2)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(textarea).toHaveValue('第一行\n第二行')
+    textarea.setSelectionRange(0, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp', shiftKey: true })
+    fireEvent.keyDown(textarea, { key: 'ArrowUp', isComposing: true })
+    fireEvent.keyDown(textarea, { key: 'ArrowUp', keyCode: 229 })
+    expect(textarea).toHaveValue('第一行\n第二行')
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(textarea).toHaveValue('历史')
+  })
+
+  it('修改历史后可发送，切换会话不会继续浏览旧会话历史', async () => {
+    const onSend = vi.fn()
+    const { rerender } = render(<InputBar onSend={onSend} conversationId="history-edit" inputHistory={['旧消息']} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    fireEvent.change(textarea, { target: { value: '修改后重发' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(textarea).toHaveValue(''))
+    expect(onSend).toHaveBeenCalledWith('修改后重发', [], expect.any(Object))
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    rerender(<InputBar onSend={onSend} conversationId="history-other" inputHistory={['另一会话']} />)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(textarea).toHaveValue('另一会话')
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(textarea).toHaveValue('')
+  })
+
   it('onSend 同一提交内卸载 InputBar 时，草稿 store 也被清空（欢迎页首发竞态）', async () => {
     render(<UnmountOnSend conversationId="c-draft-race" />)
     const textarea = screen.getByPlaceholderText('Ask me anything...')

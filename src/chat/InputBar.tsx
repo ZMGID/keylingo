@@ -413,6 +413,8 @@ export interface InputBarProps {
   usesChatRuntime?: boolean
   externalAgentName?: string | null
   conversationId?: string | null
+  /** 当前会话的用户消息，按发送时间从旧到新排列。 */
+  inputHistory?: readonly string[]
   /** 本会话挂载的知识库 id；缺省时 knowledge_search 检索全部库 */
   knowledgeBaseIds?: string[]
   onChangeKnowledgeBaseIds?: (ids: string[]) => void | Promise<void>
@@ -492,6 +494,7 @@ export const InputBar = memo(function InputBar({
   usesChatRuntime = false,
   externalAgentName = null,
   conversationId = null,
+  inputHistory = [],
   knowledgeBaseIds = [],
   onChangeKnowledgeBaseIds,
   forceKnowledgeSearch = false,
@@ -528,6 +531,13 @@ export const InputBar = memo(function InputBar({
   const composerLocked = (Boolean(disabled) || sendPending) && !queueMode
   const draftKeyValue = draftKey(conversationId)
   const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
+  const historyRef = useRef<{ entries: string[]; index: number; draft: string } | null>(null)
+  const historyCaretRef = useRef<number | null>(null)
+  useLayoutEffect(() => {
+    if (historyCaretRef.current === null) return
+    textareaRef.current?.setSelectionRange(historyCaretRef.current, historyCaretRef.current)
+    historyCaretRef.current = null
+  }, [input])
   const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
   const [attachments, setAttachments] = useState<PendingAttachment[]>(() => getComposerDraft(draftKeyValue)?.attachments ?? [])
   const [attachmentError, setAttachmentError] = useState('')
@@ -566,6 +576,8 @@ export const InputBar = memo(function InputBar({
   const sendingDraftKeyRef = useRef<string | null>(null)
   useEffect(() => {
     if (draftKeyRef.current === draftKeyValue) return
+    historyRef.current = null
+    historyCaretRef.current = null
     const prevKey = draftKeyRef.current
     draftKeyRef.current = draftKeyValue
     // 新建会话刚落库拿到 id（切 plan/orchestrate 模式等会触发）：草稿跟着搬过去，
@@ -1191,6 +1203,7 @@ export const InputBar = memo(function InputBar({
     setComposerDraft(sentDraftKey, { input: '', quotes: [], attachments: [] })
     // 等待发送时用户可能已经切到另一条有自己草稿的会话。只清本次提交实际归属的输入框。
     if (draftKeyRef.current !== sentDraftKey) return
+    historyRef.current = null
     setInput('')
     setQuotes([])
     setAttachments([])
@@ -1368,6 +1381,40 @@ export const InputBar = memo(function InputBar({
       }
     }
 
+    if (
+      (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+      !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey &&
+      !sendPending && !optimizeBusy
+    ) {
+      const el = e.currentTarget
+      const up = e.key === 'ArrowUp'
+      // 多行文本只在首尾切换历史，保留正文中的光标移动与选区操作。
+      const atBoundary = !input.includes('\n') ||
+        (up ? el.selectionStart === 0 : el.selectionEnd === input.length)
+      if (el.selectionStart === el.selectionEnd && atBoundary) {
+        if (!historyRef.current && up) {
+          const entries = inputHistory.filter((text) => text.trim())
+          if (entries.length) historyRef.current = { entries, index: entries.length, draft: input }
+        }
+        const history = historyRef.current
+        if (history) {
+          e.preventDefault()
+          history.index = Math.max(0, Math.min(history.entries.length, history.index + (up ? -1 : 1)))
+          const next = history.entries[history.index] ?? history.draft
+          const caret = next.length
+          historyCaretRef.current = caret
+          setInput(next)
+          if (next === input) {
+            el.setSelectionRange(caret, caret)
+            historyCaretRef.current = null
+          }
+          setSlashPanelOpen(false)
+          if (history.index === history.entries.length) historyRef.current = null
+          return
+        }
+      }
+    }
+
     // 生成中按 Esc = 点停止。只绑在输入框上（发完焦点就在这），
     // 不接全局监听——图片查看器/右键菜单/侧边栏那一堆 Esc 关闭会跟着一块触发。
     if (e.key === 'Escape' && onCancel && cancelVisible && !cancelling) {
@@ -1382,6 +1429,7 @@ export const InputBar = memo(function InputBar({
   }
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    historyRef.current = null
     const nextValue = e.target.value
     setInput(nextValue)
     // 高度/滚动条由 input 的 layout effect 统一跟，这里不再内联量一遍。
