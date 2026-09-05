@@ -61,6 +61,17 @@ function renderTabWithRerender(overrides: Partial<Props> = {}) {
 }
 
 describe('ProvidersTab', () => {
+  it('OpenCode Free enables model management without a key field', async () => {
+    const provider = makeProvider({ name: 'OpenCode Free', baseUrl: 'https://opencode.ai/zen/v1', apiKeys: [] })
+    const props = renderTab({ selectedProvider: provider, settings: makeSettings({ providers: [provider] }) })
+    expect(screen.getByText(/免费模型，无需账号/)).toBeInTheDocument()
+    expect(document.querySelectorAll('input[type="password"]')).toHaveLength(0)
+    const manage = screen.getByRole('button', { name: /管理模型/ })
+    expect(manage).toBeEnabled()
+    await userEvent.click(manage)
+    expect(props.onOpenModelPicker).toHaveBeenCalled()
+  })
+
   it('未选中供应商时显示引导文案且不渲染详情', () => {
     renderTab({ selectedProvider: undefined })
     expect(screen.getByText(/在左侧选择供应商/)).toBeTruthy()

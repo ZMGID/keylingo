@@ -19,6 +19,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { name: 'Codex OAuth', baseUrl: 'https://chatgpt.com/backend-api/codex', apiFormat: 'openai_responses', oauth: 'codex' },
   { name: 'Kimi OAuth', baseUrl: 'https://api.kimi.com/coding/v1', oauth: 'kimi' },
   { name: 'Antigravity OAuth', baseUrl: 'https://daily-cloudcode-pa.googleapis.com', apiFormat: 'gemini', oauth: 'antigravity' },
+  { name: 'OpenCode Free', baseUrl: 'https://opencode.ai/zen/v1' },
   {
     name: 'Hezubus',
     baseUrl: 'https://hezubus.cc/',

@@ -12,7 +12,7 @@ import { ProviderRequestPanel } from '../ProviderRequestPanel'
 import { ProviderOAuthPanel } from '../ProviderOAuthPanel'
 import { ProviderUsageCard } from '../ProviderUsageCard'
 import { resolveModelInfo } from '../../data/modelMatching'
-import { api, normalizeProviderApiFormat, clampedActiveKeyIndex, activeKeyIndexAfterRemove } from '../../api/tauri'
+import { api, isOpenCodeFree, normalizeProviderApiFormat, clampedActiveKeyIndex, activeKeyIndexAfterRemove } from '../../api/tauri'
 import type { I18n, Lang } from '../i18n'
 import type { ModelProvider } from '../../api/tauri'
 
@@ -105,7 +105,8 @@ export function ProviderDetail({
         </div>
       </FieldBlock>
 
-      {!provider.request?.oauth && <FieldBlock label={t.apiKey} description={t.apiKeysHint}>
+      {isOpenCodeFree(provider) && <p className="text-sm opacity-70">{lang === 'zh' ? '免费模型，无需账号、API Key 或安装 OpenCode。管理模型可刷新当前免费列表。' : 'Free models: no account, API key or OpenCode installation required. Manage models to refresh the free catalog.'}</p>}
+      {!provider.request?.oauth && !isOpenCodeFree(provider) && <FieldBlock label={t.apiKey} description={t.apiKeysHint}>
         <div className="space-y-1.5">
           {(() => {
             // 命中快速预设 baseUrl 时，给出「获取 API Key」外链引导用户申请。

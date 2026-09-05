@@ -158,6 +158,15 @@ pub fn header_pairs(
     for (name, value) in crate::provider_oauth::header_pairs(provider) {
         upsert_pair(&mut pairs, name, value);
     }
+    if provider.is_opencode_free() {
+        if !pairs.iter().any(|(name, _)| name.eq_ignore_ascii_case("user-agent")) {
+            pairs.push(("User-Agent".into(), concat!("Kivio/", env!("CARGO_PKG_VERSION")).into()));
+        }
+        pairs.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization") && !name.eq_ignore_ascii_case("x-api-key"));
+        if let Some(id) = conversation_id.filter(|id| !id.is_empty()) {
+            upsert_pair(&mut pairs, "x-opencode-session".into(), id.into());
+        }
+    }
     pairs
 }
 
@@ -193,6 +202,22 @@ pub fn apply(
 mod tests {
     use super::*;
     use crate::settings::ProviderRequestConfig;
+
+    #[test]
+    fn opencode_free_omits_auth_and_preserves_session_affinity() {
+        let mut provider = provider_with(ProviderRequestConfig {
+            custom_headers: vec![header("Authorization", "do-not-send")],
+            ..Default::default()
+        });
+        provider.base_url = "https://opencode.ai/zen/v1".into();
+        provider.api_keys.clear();
+        assert!(provider.has_credentials());
+        let pairs = header_pairs(&provider, Some("conversation-1"));
+        assert!(!pairs.iter().any(|(name, _)| name.eq_ignore_ascii_case("authorization")));
+        assert!(pairs.contains(&("x-opencode-session".into(), "conversation-1".into())));
+        provider.base_url = "https://opencode.ai/zen/go/v1".into();
+        assert!(!provider.has_credentials());
+    }
 
     fn provider_with(request: ProviderRequestConfig) -> ModelProvider {
         ModelProvider {

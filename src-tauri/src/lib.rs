@@ -25,6 +25,7 @@ pub mod proc;
 pub mod prompts;
 pub mod provider_request;
 pub mod provider_oauth;
+mod opencode_free;
 pub mod rapidocr;
 pub mod replace_translation;
 #[cfg(target_os = "macos")]

@@ -897,7 +897,15 @@ export type ProviderOAuthUsage = { plan: string | null; fetchedAt: number; windo
 export type ProviderOAuthLogin = { loginId: string; userCode: string; verificationUrl: string; interval: number; expiresAt: number }
 export type ProviderOAuthPoll = { status: 'pending' | 'authorized'; interval: number; auth: ProviderOAuthConfig | null }
 
+export function isOpenCodeFree(provider: ModelProvider): boolean {
+  return !provider.request?.oauth
+    && (!provider.apiFormat || provider.apiFormat === 'openai_chat')
+    && provider.baseUrl.trim().replace(/\/+$/, '') === 'https://opencode.ai/zen/v1'
+    && provider.apiKeys.every(key => !key.trim())
+}
+
 export function providerHasCredentials(provider: ModelProvider): boolean {
+  if (isOpenCodeFree(provider)) return true
   return provider.request?.oauth ? Boolean(provider.request.oauth.credentialId) : provider.apiKeys.some(key => key.trim() !== '')
 }
 

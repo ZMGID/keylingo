@@ -170,7 +170,15 @@ impl ProviderApiFormat {
 }
 
 impl ModelProvider {
+    pub fn is_opencode_free(&self) -> bool {
+        self.request.oauth.is_none()
+            && self.api_format_kind() == ProviderApiFormat::OpenAiChat
+            && crate::opencode_free::is_endpoint(&self.base_url)
+            && self.api_keys.iter().all(|key| key.trim().is_empty())
+    }
+
     pub fn has_credentials(&self) -> bool {
+        if self.is_opencode_free() { return true; }
         if let Some(auth) = &self.request.oauth {
             return auth.credential_id.is_some();
         }
