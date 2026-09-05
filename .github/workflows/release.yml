@@ -103,6 +103,42 @@ jobs:
           tauriScript: npx tauri
           args: ${{ matrix.args }}
 
+      - name: Verify bundled skills in macOS DMG
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount_dir=$(mktemp -d)
+          dmg=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg"
+          trap 'hdiutil detach "$mount_dir"; rmdir "$mount_dir"' EXIT
+          resources="$mount_dir/Kivio Desktop.app/Contents/Resources"
+          for skill in pdf docx xlsx obsidian-markdown obsidian-bases json-canvas obsidian-cli; do
+            test -s "$resources/skills/$skill/SKILL.md"
+            echo "Verified: skills/$skill/SKILL.md"
+          done
+          for skill in obsidian-markdown obsidian-bases json-canvas; do
+            test -d "$resources/skills/$skill/references"
+          done
+
+      - name: Verify bundled skills in Windows installer
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer missing' }
+          $inspectDir = Join-Path $env:RUNNER_TEMP ('kivio-installer-check-' + [guid]::NewGuid().ToString('n'))
+          & 'C:/Program Files/7-Zip/7z.exe' x $installer.FullName "-o$inspectDir" -y
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract NSIS installer' }
+          $files = Get-ChildItem -LiteralPath $inspectDir -Recurse -File
+          foreach ($skill in @('pdf','docx','xlsx','obsidian-markdown','obsidian-bases','json-canvas','obsidian-cli')) {
+            $match = $files | Where-Object { $_.FullName -match "[\\/]skills[\\/]$skill[\\/]SKILL\.md$" -and $_.Length -gt 0 }
+            if (-not $match) { throw "Missing bundled skill: $skill" }
+            Write-Host "Verified: skills/$skill/SKILL.md"
+          }
+
       - name: Package and upload Windows portable zip
         if: matrix.platform == 'windows-latest'
         env:
