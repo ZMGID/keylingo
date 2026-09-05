@@ -52,6 +52,17 @@ concurrently in the original working directory.
 Unit tests cover stream parsing, tool errors, soft denials, usage accounting, model
 catalog parsing, launch flags, installer routing and reconnect/retry policy.
 
+Desktop follow-up: the first in-app `agy models` probe hit its 30-second timeout;
+a forced retry through the same Tauri command returned all 14 models. The probe now
+allows 60 seconds and drops/kills its child on timeout. The picker displays the
+backend error instead of only a generic fallback notice. This mitigates slow probes;
+the CLI's intermittent delay has not been traced to an internal cause.
+
+For debug builds, write a request with `prompt: ""`, `probeModels: true`,
+`externalAgentId: "antigravity"`, and an optional `conversationId` to
+`<app_data>/chat_probe/request.json`. The watcher runs the exact model-picker command
+with cache bypass and writes `models-result.json`, without creating a chat turn.
+
 The opt-in `live_antigravity_multiturn_tools_cancel_and_resume` Rust test uses an
 isolated temporary workspace and a signed-in `agy`. It checks multi-turn recall,
 file-tool events, cancellation, process replacement and native conversation recovery:

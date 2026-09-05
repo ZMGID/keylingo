@@ -55,7 +55,8 @@ pub const ANTIGRAVITY_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
         ("high", "High"),
     ],
     list_models_args: Some(&["models"]),
-    list_models_timeout_secs: Some(30),
+    // Fetches the remote catalog; the desktop's first probe can exceed 30s.
+    list_models_timeout_secs: Some(60),
     models_from_stderr: false,
     model_probe: None,
     model_probe_args: None,
