@@ -61,6 +61,13 @@ skill names are not hardcoded into the built-in menu. Terminal-only commands ret
 an explanation without destroying the session. The live test checks reports and
 skill passthrough between ordinary turns, preserving recall, then cancel/resume.
 
+Reports persist as versioned `kivio-cli-report` JSON fences, rendered by the shared
+Markdown pipeline as command panels. Quota reports show remaining bars and local
+reset times; help/skills/agents have search and copy controls. Configuration reports
+use key/value rows. Raw output remains available in a collapsed disclosure. Exact
+legacy quota reports are also rendered as panels without rewriting stored history.
+Unknown quota formats fall back to preserved text instead of guessed percentages.
+
 ## Verification
 
 Verified on Windows with agy 1.1.26: 697 external-agent unit/regression tests,

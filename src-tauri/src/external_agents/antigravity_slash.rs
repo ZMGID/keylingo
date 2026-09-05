@@ -168,9 +168,35 @@ pub fn help_text() -> String {
     text
 }
 
+/// A versioned, inert payload rendered as a command panel by Kivio. Keep the raw
+/// output for copying and for unknown future CLI formats; never embed executable HTML.
+pub fn render_report(command: &str, output: &str) -> String {
+    let payload = serde_json::json!({
+        "version": 1, "agent": "antigravity", "command": command, "output": output,
+    })
+    .to_string()
+    .replace('`', "\\u0060");
+    format!("```kivio-cli-report\n{payload}\n```")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rich_report_roundtrips_raw_output_without_breaking_the_fence() {
+        let raw = "skill\tDescription\n```html\n<script>noop</script>\n```";
+        let rendered = render_report("skills", raw);
+        let body = rendered
+            .strip_prefix("```kivio-cli-report\n")
+            .unwrap()
+            .strip_suffix("\n```")
+            .unwrap();
+        assert!(!body.contains('`'));
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload["output"], raw);
+        assert_eq!(payload["version"], 1);
+    }
 
     #[test]
     fn shipped_catalog_only_advertises_implemented_reports() {
