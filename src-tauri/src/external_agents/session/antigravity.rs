@@ -393,7 +393,10 @@ impl AntigravitySession {
                 if name == "help" {
                     let _ = events
                         .send(UnifiedAgentEvent::TextDelta {
-                            delta: crate::external_agents::antigravity_slash::help_text(),
+                            delta: crate::external_agents::antigravity_slash::render_report(
+                                name,
+                                &crate::external_agents::antigravity_slash::help_text(),
+                            ),
                         })
                         .await;
                     return Ok(());
@@ -413,7 +416,9 @@ impl AntigravitySession {
                     }
                 };
                 let text = match result {
-                    Ok(text) if !text.is_empty() => text,
+                    Ok(text) if !text.is_empty() => {
+                        crate::external_agents::antigravity_slash::render_report(name, &text)
+                    }
                     Ok(_) => "命令已完成，没有返回内容。".into(),
                     Err(error) => format!("命令执行失败：{error}"),
                 };
@@ -565,13 +570,22 @@ mod tests {
     }
 
     fn text(events: &[UnifiedAgentEvent]) -> String {
-        events
+        let text: String = events
             .iter()
             .filter_map(|event| match event {
                 UnifiedAgentEvent::TextDelta { delta } => Some(delta.as_str()),
                 _ => None,
             })
-            .collect()
+            .collect();
+        if let Some(body) = text
+            .strip_prefix("```kivio-cli-report\n")
+            .and_then(|v| v.strip_suffix("\n```"))
+        {
+            if let Ok(value) = serde_json::from_str::<Value>(body) {
+                return value["output"].as_str().unwrap_or_default().to_string();
+            }
+        }
+        text
     }
 
     #[tokio::test]
