@@ -1,4 +1,4 @@
-import type { VirtualItem } from '@tanstack/react-virtual'
+import type { VirtualItem, Virtualizer } from '@tanstack/react-virtual'
 import { normalizeToolCallStatus } from './toolStatus'
 import type { ChatMessage } from './types'
 
@@ -198,6 +198,23 @@ export function measureChatVirtualRow(
     if (box) return Math.round(box[horizontal ? 'inlineSize' : 'blockSize'])
   }
   return element[horizontal ? 'offsetWidth' : 'offsetHeight']
+}
+
+/**
+ * TanStack defers ref measurements while scrolling. A live row switching from
+ * flow to absolute positioning cannot wait for ResizeObserver: its last live
+ * height may predate collapsed reasoning or the completed footer. Register the
+ * observer normally, then replace that estimate before the handoff paints.
+ */
+export function measureSettledChatRow(
+  element: HTMLDivElement,
+  instance: Virtualizer<HTMLDivElement, HTMLDivElement>,
+): void {
+  instance.measureElement(element)
+  instance.resizeItem(
+    instance.indexFromElement(element),
+    instance.options.measureElement(element, undefined, instance),
+  )
 }
 
 /** Prevent TanStack's internal itemSizeCache from crossing width layouts. */

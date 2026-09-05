@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { Virtualizer } from '@tanstack/react-virtual'
 import {
   canReuseLiveRowHeight,
   chatMessageLayoutRevision,
@@ -9,6 +10,7 @@ import {
   getCachedRowMeasurement,
   layoutScopedVirtualKey,
   measureChatVirtualRow,
+  measureSettledChatRow,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
   sendReserveHeight,
@@ -105,6 +107,43 @@ describe('message layout revision', () => {
 })
 
 describe('virtual row measurement', () => {
+  it.each([724, 812])('settles to %i px before an observer tick while scrolling', (completedHeight) => {
+    const element = {
+      offsetHeight: completedHeight,
+      isConnected: true,
+      getAttribute: () => '0',
+    } as unknown as HTMLDivElement
+    const instance = new Virtualizer<HTMLDivElement, HTMLDivElement>({
+      count: 1,
+      getScrollElement: () => null,
+      estimateSize: () => 761,
+      getItemKey: () => 'answer',
+      initialRect: { width: 848, height: 663 },
+      observeElementRect: () => undefined,
+      observeElementOffset: () => undefined,
+      scrollToFn: () => undefined,
+      measureElement: (node, entry) => {
+        const size = measureChatVirtualRow(node, entry)
+        setCachedRowMeasurement('conversation:848', 'answer', size)
+        return size
+      },
+    })
+    expect(instance.getTotalSize()).toBe(761)
+    instance.isScrolling = true
+
+    // The regular ref deliberately defers to RO during a scroll, leaving the
+    // expanded live estimate in place. No observer has delivered yet.
+    instance.measureElement(element)
+    expect(instance.getTotalSize()).toBe(761)
+    expect(getCachedRowMeasurement('conversation:848', 'answer')).toBeUndefined()
+
+    measureSettledChatRow(element, instance)
+    expect(instance.getTotalSize()).toBe(completedHeight)
+    expect(instance.itemSizeCache.get('answer')).toBe(completedHeight)
+    expect(getCachedRowMeasurement('conversation:848', 'answer')).toBe(completedHeight)
+    expect(instance.elementsCache.get('answer')).toBe(element)
+  })
+
   it('同步挂载时读取真实 DOM 高度，不复用旧缓存高度', () => {
     const element = { offsetHeight: 252, offsetWidth: 640 } as HTMLElement
     expect(measureChatVirtualRow(element, undefined)).toBe(252)

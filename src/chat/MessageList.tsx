@@ -42,6 +42,7 @@ import {
   getCachedRowMeasurement,
   layoutScopedVirtualKey,
   measureChatVirtualRow,
+  measureSettledChatRow,
   sendReserveHeight,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
@@ -276,8 +277,13 @@ function MessageListBase({
     if (liveEndingThisFrame) beginStreamSettleEagerHydrate()
   }, [liveEndingThisFrame])
   prevLiveRowActiveRef.current = liveRowActive
-  // Last measured outside-live height; filled every streaming layout, consumed on settle seed.
+  // RO height seeds the first estimate; the handoff ref corrects it before paint.
   const liveBubbleHeightRef = useRef(0)
+  const liveRowElementRef = useRef<HTMLDivElement | null>(null)
+  const rememberLiveRow = useCallback((element: HTMLDivElement | null) => {
+    // Keep the node through the ref detach/attach when it becomes historical.
+    if (element) liveRowElementRef.current = element
+  }, [])
   const lastLiveMessageRef = useRef<ChatMessage | null>(null)
   // settle 帧种子的**按消息 id** 版本。持久缓存的 key 带 layoutRevision，而 twin 首次进入
   // virtualizer 的那次 render 里消息对象可能已被替换（usage / stream_outcome 到位 → 页脚
@@ -318,6 +324,7 @@ function MessageListBase({
     liveRowModelRef.current.reset()
     liveRowModelConversationRef.current = conversationId
     liveBubbleHeightRef.current = 0
+    liveRowElementRef.current = null
     lastLiveMessageRef.current = null
   }
   const historyAssistantIds = useMemo(
@@ -1004,6 +1011,14 @@ function MessageListBase({
   }
 
   const virtualItems = virtualizer.getVirtualItems()
+  const measureHistoryRow = useCallback((element: HTMLDivElement | null) => {
+    if (element && element === liveRowElementRef.current) {
+      liveRowElementRef.current = null
+      measureSettledChatRow(element, virtualizer)
+    } else {
+      virtualizer.measureElement(element)
+    }
+  }, [virtualizer])
   // Row ResizeObservers and TanStack's own viewport observer update mounted rows.
   // Avoid a blanket measure(): it clears the virtualizer's measured cache and makes
   // detached readers pay the estimate-to-real-height correction for every row.
@@ -1708,11 +1723,9 @@ function MessageListBase({
 
   // live → 历史 交接。
   //
-  // Primary path: live is OUTSIDE the virtualizer (document flow). Streaming
-  // pin is contentGrowth-only and stable. On settle the outside bubble unmounts
-  // and the twin remounts inside the virtualizer at estimate height — height
-  // collapses then re-expands. Seed cache from the last live height and run the
-  // same multi-frame bottomHold as "jump to bottom" so pin survives hydrate.
+  // The same live DOM becomes an absolute historical row. Its ref synchronously
+  // replaces the RO seed with the completed height, even while scrolling.
+  // bottomHold keeps the follow position stable while heavy content hydrates.
   // live 行高度用 RO 持续跟踪（settle 帧种子消费）。原实现在 layout effect 里每个
   // token querySelector + getBoundingClientRect —— 每帧一次强制布局读，长回答白白累积。
   // RO 回调在布局后、绘制前投递，此时读 gBCR 拿的是新鲜布局，不触发额外 reflow。
@@ -1738,24 +1751,10 @@ function MessageListBase({
     const wasLive = liveScrollHandoffRef.current
     liveScrollHandoffRef.current = liveRowActive
     if (!wasLive || liveRowActive) return
-    if (!streamFollowIntentRef.current && !followHandle.isFollowing()) return
-
-    const liveHeight = Math.round(liveBubbleHeightRef.current)
     liveBubbleHeightRef.current = 0
-    if (liveHeight > 0) {
-      const settlingId = snapshot.messageId
-        || [...messages].reverse().find((message) => message.role === 'assistant')?.id
-        || null
-      if (settlingId) {
-        const settling = messages.find((message) => message.id === settlingId)
-        const liveMessage = lastLiveMessageRef.current
-        if (settling && liveMessage && canReuseLiveRowHeight(liveMessage, settling)) {
-          const rowKey = `${liveRowModel.resolveMessageKey(settling.id)}:${chatMessageLayoutRevision(settling)}`
-          setCachedRowMeasurement(layoutKey, rowKey, liveHeight)
-          estimateSizeRef.current.set(liveRowModel.resolveMessageKey(settling.id), liveHeight)
-        }
-      }
-    }
+    // The ref has already measured the committed DOM. Never overwrite that
+    // cache here with the earlier, potentially expanded live height.
+    if (!streamFollowIntentRef.current && !followHandle.isFollowing()) return
 
     cancelNavigatorSettle()
     navigatorHoldRef.current = null
@@ -1787,12 +1786,8 @@ function MessageListBase({
     cancelNavigatorSettle,
     followHandle,
     historyItems.length,
-    layoutKey,
     liveRowActive,
-    liveRowModel,
-    messages,
     setNavigationLock,
-    snapshot.messageId,
   ])
 
   // 发送后的尾部预留，两个阶段一处算：
@@ -2044,7 +2039,9 @@ function MessageListBase({
       {rows.map(({ item, virtualItem }) => (
         <div
           key={`${conversationId ?? 'empty'}:${item.key}`}
-          ref={virtualItem && import.meta.env.MODE !== 'test' ? virtualizer.measureElement : undefined}
+          ref={virtualItem
+            ? (import.meta.env.MODE !== 'test' ? measureHistoryRow : undefined)
+            : rememberLiveRow}
           data-index={virtualItem?.index}
           data-chat-item-key={virtualItem ? measurementKey(item) : undefined}
           data-chat-row-index={virtualItem?.index}
