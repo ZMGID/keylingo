@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { ChevronDown, Minus, Plus, RefreshCw, Search, X } from 'lucide-react'
 import type { ModelProvider } from '../api/tauri'
 import { Button, IconButton } from '../components/Button'
+import { resolveModelInfo, providerModelDatabaseId } from '../data/modelMatching'
 import { ModelIcon } from '../chat/ModelIcon'
 import { Input } from './components'
 
@@ -89,8 +90,8 @@ export function ProviderModelsPicker({
   const filteredModels = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return allModels
-    return allModels.filter((model) => model.toLowerCase().includes(q))
-  }, [allModels, query])
+    return allModels.filter((model) => model.toLowerCase().includes(q) || resolveModelInfo(model, provider.modelOverrides, provider).displayName?.toLowerCase().includes(q))
+  }, [allModels, query, provider])
 
   const addableModels = useMemo(
     () => filteredModels.filter((model) => !enabledSet.has(modelKey(model))),
@@ -238,9 +239,9 @@ export function ProviderModelsPicker({
                 const isEnabled = enabledSet.has(modelKey(model))
                 return (
                   <li key={model} className="kv-model-picker-row">
-                    <ModelIcon model={model} size={16} />
+                    <ModelIcon model={providerModelDatabaseId(model, provider)} size={16} />
                     <span className="kv-model-picker-row-name" title={model}>
-                      {model}
+                      {providerModelDatabaseId(model, provider) !== model ? (resolveModelInfo(model, provider.modelOverrides, provider).displayName ?? model) : model}
                     </span>
                     {isEnabled ? (
                       <span className="kv-tag ok shrink-0">{labels.enabled}</span>

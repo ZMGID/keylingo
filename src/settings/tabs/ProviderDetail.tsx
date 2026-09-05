@@ -10,6 +10,7 @@ import { ModelIcon } from '../../chat/ModelIcon'
 import { PROVIDER_PRESETS } from '../providerPresets'
 import { ProviderRequestPanel } from '../ProviderRequestPanel'
 import { ProviderOAuthPanel } from '../ProviderOAuthPanel'
+import { ProviderUsageCard } from '../ProviderUsageCard'
 import { resolveModelInfo } from '../../data/modelMatching'
 import { api, normalizeProviderApiFormat, clampedActiveKeyIndex, activeKeyIndexAfterRemove } from '../../api/tauri'
 import type { I18n, Lang } from '../i18n'
@@ -75,6 +76,7 @@ export function ProviderDetail({
 
   return (
     <>
+    <ProviderUsageCard key={provider.id} provider={provider} lang={lang} />
     <SettingsGroup title={lang === 'zh' ? '配置' : 'Configuration'}>
       <ProviderOAuthPanel key={provider.id} provider={provider} lang={lang} onUpdateProvider={onUpdateProvider} />
       <FieldBlock label={t.baseUrl}>
@@ -266,7 +268,7 @@ export function ProviderDetail({
             </li>
           )}
           {provider.enabledModels.map(model => {
-            const caps = resolveModelInfo(model, provider.modelOverrides).capabilities
+            const caps = resolveModelInfo(model, provider.modelOverrides, provider).capabilities
             return (
               <li key={model} className="kv-enabled-model-row" onClick={() => onOpenModelDrawer({ providerId: provider.id, model })}>
                 <ModelIcon model={model} size={16} />

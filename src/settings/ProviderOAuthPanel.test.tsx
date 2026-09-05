@@ -9,6 +9,7 @@ vi.mock('../api/tauri', async () => {
   return { ...actual, api: {
     providerOAuthStart: vi.fn(), providerOAuthPoll: vi.fn(), providerOAuthCancel: vi.fn(),
     providerOAuthDisconnect: vi.fn(), openExternal: vi.fn(),
+    providerOAuthAccount: vi.fn(async () => ({ email: null, name: null, accountId: "test-account" })),
   } }
 })
 const login: ProviderOAuthLogin = { loginId: 'login-1', userCode: 'ABCD-1234', verificationUrl: 'https://auth.openai.com/codex/device', interval: 3, expiresAt: 1900000000 }

@@ -88,6 +88,7 @@ import type {
 import {
   api,
   builtinWebSearchSupported,
+  resolveProviderWebSearchMode,
   type ChatSessionConsentPayload,
   type ChatHookPayload,
   type ChatToolConfirmPayload,
@@ -737,6 +738,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [webSearchEnabled, setWebSearchEnabled] = useState(true)
   // provider id → apiFormat（任务 07-23）：用于判断当前模型是否支持内置搜索。
   const [providerApiFormats, setProviderApiFormats] = useState<Record<string, string>>({})
+  const [providerOAuthTypes, setProviderOAuthTypes] = useState<Record<string, string>>({})
   const [providerBaseUrls, setProviderBaseUrls] = useState<Record<string, string>>({})
   const [enabledToolCount, setEnabledToolCount] = useState<number | null>(null)
   const [toolsDisabledReason, setToolsDisabledReason] = useState('')
@@ -1199,7 +1201,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     : draftModel
   // 会话级三态联网搜索（任务 07-23）：会话显式模式优先 → 记住的全局默认（上次选择）
   // → 全局 nativeTools.webSearch 开关。这样选一次内置即成为所有新对话的默认。
-  const activeWebSearchMode = useMemo<WebSearchMode>(() => {
+  const requestedWebSearchMode = useMemo<WebSearchMode>(() => {
     if (currentConversation && !currentConversationIsBlank) {
       const explicit = currentConversation.webSearchMode ?? currentConversation.web_search_mode
       if (explicit) return explicit
@@ -1210,12 +1212,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (remembered) return remembered
     return webSearchEnabled ? 'third_party' : 'off'
   }, [currentConversation, currentConversationIsBlank, draftWebSearchMode, webSearchEnabled])
+  const activeWebSearchMode = resolveProviderWebSearchMode(requestedWebSearchMode, providerOAuthTypes[activeProviderId ?? ''])
   const activeBuiltinWebSearchSupported = useMemo(
     () => builtinWebSearchSupported(
       providerApiFormats[activeProviderId ?? ''],
       providerBaseUrls[activeProviderId ?? ''],
+      providerOAuthTypes[activeProviderId ?? ''],
     ),
-    [providerApiFormats, providerBaseUrls, activeProviderId],
+    [providerApiFormats, providerBaseUrls, providerOAuthTypes, activeProviderId],
   )
   // 多模型一问多答（任务 06-30）：当前生效的多答模型集（会话级持久 reply_models，欢迎页用草稿）。
   const activeReplyModels = useMemo<ModelRef[]>(
@@ -1289,6 +1293,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const chatTools = settings.chatTools
       setMcpServers(chatTools?.servers ?? [])
       setWebSearchEnabled(chatTools?.nativeTools?.webSearch !== false)
+      setProviderOAuthTypes(
+        Object.fromEntries((settings.providers ?? []).map((p) => [p.id, p.request?.oauth?.provider ?? ''])),
+      )
       setProviderApiFormats(
         Object.fromEntries((settings.providers ?? []).map((p) => [p.id, p.apiFormat ?? ''])),
       )
@@ -3183,7 +3190,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     // 会话级三态联网搜索（任务 07-23）：把欢迎页草稿或记住的全局默认落到新会话上
     // （仅当会话尚未显式设过模式时），后端 Builtin 注入依赖会话字段而非前端展示值。
     {
-      const desiredMode = draftWebSearchMode ?? loadLastWebSearchMode()
+      const desiredMode = resolveProviderWebSearchMode(
+        draftWebSearchMode ?? loadLastWebSearchMode(), providerOAuthTypes[conversation.provider_id],
+      )
       const convMode = conversation.web_search_mode ?? conversation.webSearchMode ?? null
       if (desiredMode && convMode === null) {
         try {
@@ -3395,6 +3404,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     draftThinkingLevel,
     draftReplyModels,
     draftWebSearchMode,
+    providerOAuthTypes,
     effectiveSkillId,
     enabledSkills,
     usesChatRuntime,

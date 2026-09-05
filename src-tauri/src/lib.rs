@@ -525,6 +525,8 @@ pub fn run() {
             provider_oauth::provider_oauth_poll,
             provider_oauth::provider_oauth_cancel,
             provider_oauth::provider_oauth_disconnect,
+            provider_oauth::usage::provider_oauth_usage,
+            provider_oauth::account::provider_oauth_account,
             commands::get_settings,
             windows::chat_window_apply_mica,
             windows::chat_window_set_opaque,

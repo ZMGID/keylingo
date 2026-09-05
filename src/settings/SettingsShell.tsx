@@ -169,7 +169,7 @@ function resolveEffectiveChatModel(settings: SettingsData): { provider?: ModelPr
 function resolveEffectiveChatMaxOutput(settings: SettingsData, fallbackTokens: number) {
   const { provider, model } = resolveEffectiveChatModel(settings)
   const override = model ? provider?.modelOverrides?.[model]?.maxOutput : undefined
-  const modelInfo = model ? resolveModelInfo(model, provider?.modelOverrides) : {}
+  const modelInfo = model ? resolveModelInfo(model, provider?.modelOverrides, provider) : {}
   const maxOutput = override || modelInfo.maxOutput || fallbackTokens
   const source: 'override' | 'database' | 'fallback' = override
     ? 'override'
@@ -2327,6 +2327,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       {drawerModel && settings && (
         <ModelDetailDrawer
           modelName={drawerModel.model}
+          provider={settings.providers.find(p => p.id === drawerModel.providerId)}
           overrides={settings.providers.find(p => p.id === drawerModel.providerId)?.modelOverrides}
           lang={lang}
           onClose={() => setDrawerModel(null)}

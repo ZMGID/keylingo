@@ -38,7 +38,7 @@ Account eligibility and quota are controlled by the upstream service; an OAuth l
 - Antigravity uses Authorization Code + PKCE, an independent random state, and a temporary listener bound to `127.0.0.1:51121`. The browser redirect is `http://localhost:51121/oauth-callback`. Cancellation, a five-minute timeout, and completion release the listener; an occupied port produces a retryable error. Callback errors never echo codes or query strings.
 - Antigravity project metadata is discovered with `loadCodeAssist` and kept with the credentials in the native store. Missing projects require account setup in Antigravity followed by a new login. No project IDs are borrowed or synthesized. Refresh preserves the project and handles refresh-token rotation.
 - Antigravity lists runtime IDs from `fetchAvailableModels`, preserving account-specific reasoning variants. Requests use its native Cloud Code Assist envelope; the Gemini adapter unwraps SSE responses and preserves tool IDs/signatures for Claude and GPT-OSS. Nonstreaming consumers collect the same stream, and incomplete streams report an error.
-- Antigravity uses the daily Cloud Code Assist endpoint. Automatic endpoint/model substitution, quota dashboards, remote callback pasting and built-in Google Search are not implemented. Normal agent search tools remain available. This is an unofficial integration; real account access and upstream compatibility still need live verification.
+- Antigravity uses the daily Cloud Code Assist endpoint. Automatic endpoint/model substitution, remote callback pasting and built-in Google Search are not implemented. Normal agent search tools remain available. This is an unofficial integration; real account access and upstream compatibility still need live verification.
 - Model discovery and connection tests accept unsaved authentication metadata, matching the rest of the settings workflow.
 
 ## Attribution
@@ -46,6 +46,10 @@ Account eligibility and quota are controlled by the upstream service; an OAuth l
 Protocol logic in `provider_oauth.rs` is adapted from Hermes Agent (Copyright © 2025 Nous Research, MIT) and Kimi CLI (Moonshot AI, Apache-2.0), rewritten for Tauri/Rust with Kivio-owned storage and UI. License texts are retained in [licenses/hermes-agent-MIT.txt](licenses/hermes-agent-MIT.txt) and [licenses/kimi-cli-Apache-2.0.txt](licenses/kimi-cli-Apache-2.0.txt).
 
 `provider_oauth/antigravity.rs` and the Antigravity Gemini bridge adapt protocol details from Rahul Arya's pi-antigravity at commit `70e8f6e3603c4926e29d31c97be5f9719003f84f`. Its MIT license is retained in [licenses/pi-antigravity-MIT.txt](licenses/pi-antigravity-MIT.txt).
+
+## Authorized account identity
+
+All three OAuth panels show the current account below the authorization status, including existing credentials. Antigravity reads email, name and subject from Google's fixed OpenID userinfo endpoint. Codex reads profile email and account ID from token claims; Kimi uses user ID (preferring `user_id` over `sub`), with email/name when available. Missing identity fields remain unavailable. JWT decoding is display metadata only, never an authorization decision. Only these identity fields reach the UI; tokens remain in native credential storage. Fetch failures can be retried independently of usage, and stale results are discarded when the account changes.
 
 ## Verification
 
@@ -58,3 +62,22 @@ Real account authorization and live model access require the account holder to c
 Antigravity verification on 2026-09-05: 57 focused frontend tests and 44 Rust tests (10 OAuth, 25 Gemini, 9 request-header tests) passed. The callback tests use real loopback sockets with synthetic state and denial/cancellation; no Google credentials are exchanged. Adapter fixtures cover the request envelope, endpoint binding, bearer authentication, response unwrapping, tool IDs and thought signatures. TypeScript, changed-file ESLint, production UI build and protocol export check passed. Real Google authorization and live Antigravity inference have not been performed.
 
 Verification on 2026-09-05: 56 focused frontend tests passed; 5 OAuth unit tests, 9 request-header tests and 37 Responses-adapter tests passed. The native Windows credential-store test was also explicitly executed and passed, including cleanup. TypeScript, changed-file ESLint, and the production frontend build passed. A browser preview exercised the device-code panel with mocked authorization. Unauthenticated requests to both providers' device-authorization endpoints returned HTTP 200 with the required device fields; no account login or live inference was performed.
+
+## OAuth account usage card
+
+Settings shows an account usage card above Configuration for signed-in Kimi and Codex providers. Opening the detail page fetches once; Refresh fetches again. There is no background polling or reset-credit redemption. Antigravity usage is supported through dedicated remote quota endpoints.
+
+The backend resolves and refreshes Kivio-owned credentials through the existing OAuth flow, validates the original provider endpoint, then makes a bounded GET with redirects disabled. Only normalized quota fields reach the webview. Transport errors never include tokens or raw response bodies. Missing usage percentages remain unavailable rather than appearing as 0% used.
+
+Protocol references inspected locally on 2026-09-05:
+
+- [Kimi CLI usage implementation](https://github.com/MoonshotAI/kimi-cli/blob/main/src/kimi_cli/ui/shell/usage.py): `GET https://api.kimi.com/coding/v1/usages`, weekly `usage`, and `limits[].detail` / `limits[].window`. Supports used or remaining counters and absolute/relative reset times.
+- [Hermes account usage](https://github.com/NousResearch/hermes-agent/blob/63279301bcbdc185c1b07b98a9312eb0c862f26d/agent/account_usage.py): `GET https://chatgpt.com/backend-api/wham/usage`, bearer authorization plus account header, primary/secondary windows and plan type. Kivio also displays code-review windows when returned.
+
+The existing Hermes MIT and Kimi CLI Apache-2.0 notices apply to these protocol adaptations. The card displays remaining percentage; these are shared account limits, not Kivio-local token statistics. Tests cover remaining-to-used conversion, missing fields, numeric strings, reset times, manual refresh, failed requests and stale results after disconnect. Verification: 33 frontend tests, three Rust parser tests, TypeScript and changed-file ESLint passed. Live quota responses from an authenticated account have not been verified.
+
+### Antigravity quota follow-up
+
+The same card now supports authorized Antigravity accounts. It calls project-scoped retrieveUserQuotaSummary first, then retrieveUserQuota when grouped data is unavailable. Both use the existing fixed Cloud Code endpoint, account-bound native credentials, automatic refresh and redirect-disabled client. It parses grouped quota windows (including nested remaining fields) and model buckets, retains reset timestamps or upstream reset descriptions, and preserves missing/invalid fractions as unknown. It deliberately does not interpret fetchAvailableModels availability as real remaining quota. Remote OAuth may expose fewer windows than the Antigravity app. No local app credentials are imported, and no additional software is launched.
+
+Protocol references: [CodexBar Antigravity notes](https://github.com/steipete/CodexBar/blob/main/docs/antigravity.md), [Antigravity-Manager quota schema](https://github.com/lbjlaq/Antigravity-Manager/blob/main/src-tauri/src/modules/quota.rs), and [Google Gemini CLI quota response example](https://github.com/google-gemini/gemini-cli/issues/14883). Independently implemented schema parsing; no upstream implementation is copied. Live OAuth quota access remains account-dependent and has not been verified in this change.

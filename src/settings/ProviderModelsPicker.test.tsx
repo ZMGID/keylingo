@@ -23,6 +23,17 @@ const labels: ProviderModelsPickerLabels = {
 }
 
 describe('ProviderModelsPicker', () => {
+  it('shows and searches Kimi names while adding the original OAuth ID', async () => {
+    const onAdd = vi.fn()
+    const user = userEvent.setup()
+    render(<ProviderModelsPicker provider={makeProvider({ baseUrl: 'https://api.kimi.com/coding/v1', availableModels: ['k3', 'k3-256k'], enabledModels: [] })} lang="zh" labels={labels} fetching={false} onClose={() => {}} onFetch={() => {}} onAdd={onAdd} onAddAll={() => {}} onRemove={() => {}} />)
+    await user.type(screen.getByPlaceholderText(labels.searchPlaceholder), 'Kimi K3 256K')
+    expect(screen.getByText('Kimi K3 256K')).toBeInTheDocument()
+    expect(screen.queryByText('Kimi K3')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '添加 k3-256k' }))
+    expect(onAdd).toHaveBeenCalledWith('k3-256k')
+  })
+
   it('opens by refreshing even when cached models already exist', () => {
     const onFetch = vi.fn()
     render(

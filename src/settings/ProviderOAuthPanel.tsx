@@ -3,6 +3,7 @@ import { api, type ModelProvider, type ProviderOAuthLogin } from '../api/tauri'
 import { Button } from '../components/Button'
 import { FieldBlock, Select } from './components'
 import type { Lang } from './i18n'
+import { ProviderAccountIdentity } from './ProviderAccountIdentity'
 
 export function ProviderOAuthPanel({ provider, lang, onUpdateProvider }: {
   provider: ModelProvider
@@ -125,6 +126,7 @@ export function ProviderOAuthPanel({ provider, lang, onUpdateProvider }: {
           : <Button size="sm" disabled={busy} onClick={() => void start()}>{busy ? (zh ? '等待授权…' : 'Waiting…') : (zh ? '登录授权' : 'Sign in')}</Button>}
         {busy && !auth.credentialId && <Button size="sm" onClick={cancel}>{zh ? '取消' : 'Cancel'}</Button>}
       </div>
+      {auth.credentialId && <ProviderAccountIdentity key={`${provider.id}:${auth.provider}:${auth.credentialId}`} provider={provider} lang={lang} />}
       {login && <div className="mt-3 space-y-2 rounded-lg border border-[var(--border)] p-3">
         <p className="text-sm">{login.userCode
           ? (zh ? '在授权页面输入设备码：' : 'Enter this device code on the authorization page:')

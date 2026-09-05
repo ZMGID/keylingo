@@ -2,6 +2,28 @@ import { describe, expect, it } from 'vitest'
 import { matchModel, matchModelExact, resolveModelInfo } from './modelMatching'
 
 describe('matchModel', () => {
+  it('resolves Kimi Code short IDs only with provider context and preserves overrides', () => {
+    const provider = { baseUrl: 'https://api.kimi.com/coding/v1' }
+    expect(resolveModelInfo('k3', undefined, provider).displayName).toBe('Kimi K3')
+    expect(resolveModelInfo('k3-256k', undefined, provider).contextWindow).toBe(262144)
+    expect(resolveModelInfo('k3', undefined, provider).reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(resolveModelInfo('k3', undefined, provider).pricing?.input).toBeUndefined()
+    expect(resolveModelInfo('k3', { k3: { contextWindow: 1048576 } }, provider).contextWindow).toBe(1048576)
+    expect(matchModel('k3')).toBeNull()
+    expect(resolveModelInfo('k3', undefined, { baseUrl: 'https://other.example/v1' })).toEqual({})
+  })
+
+  it('resolves September models through provider and effort aliases without losing variants', () => {
+    expect(matchModel('gemini-3.8-flash-high')).toEqual(matchModelExact('gemini-3.8-flash'))
+    expect(matchModel('openai/gpt-6-astra')?.contextWindow).toBe(1050000)
+    expect(matchModel('anthropic/claude-fable-5-1')?.displayName).toBe('Claude Fable 5.1')
+    expect(matchModel('claude-mythos-5-1')?.displayName).toBe('Claude Mythos 5.1')
+    expect(matchModel('meta/muse-spark-1.3-contributor')?.pricing?.input).toBe(0.1)
+    expect(matchModel('meta/muse-spark-1.3')?.pricing?.input).toBe(1.25)
+    expect(matchModel('gemini-3.8-flash-high')?.reasoningEfforts).toEqual(['low', 'medium', 'high'])
+    expect(matchModelExact('gpt-6')).toBeNull()
+  })
+
   it('returns null for blank model names', () => {
     expect(matchModel('')).toBeNull()
     expect(matchModel('   ')).toBeNull()

@@ -268,7 +268,7 @@ pub(super) async fn cancel(id: &str) {
     }
 }
 
-async fn control(
+pub(super) async fn control(
     client: &reqwest::Client,
     token: &str,
     method: &str,

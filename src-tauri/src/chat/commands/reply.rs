@@ -436,7 +436,8 @@ pub(super) async fn complete_assistant_reply_inner(
     // 内置搜索走 `config.web_search_mode` → 各适配器请求体注入，不在工具列表里。
     // builder 会话已清空工具（只留 save_assistant），不参与搜索门控。
     let web_search_mode =
-        crate::chat::types::WebSearchMode::resolve(conversation.web_search_mode, &settings);
+        crate::chat::types::WebSearchMode::resolve(conversation.web_search_mode, &settings)
+            .for_provider(&provider);
     if !builder_mode {
         apply_web_search_mode_tool_filter(&mut tools, web_search_mode, &settings);
     }

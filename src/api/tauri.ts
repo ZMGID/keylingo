@@ -892,6 +892,8 @@ export type ModelInfo = {
 // apiKeys 是密钥池；activeKeyIndex 是用户点选的当前 Key。
 // 鉴权/配额失败时后端仍会自动切到池里其它 Key。
 export type ProviderOAuthConfig = { provider: 'codex' | 'kimi' | 'antigravity'; credentialId?: string }
+export type ProviderOAuthAccount = { email: string | null; name: string | null; accountId: string | null }
+export type ProviderOAuthUsage = { plan: string | null; fetchedAt: number; windows: { label: string; usedPercent: number | null; used: number | null; limit: number | null; resetsAt: number | null; resetHint?: string | null }[] }
 export type ProviderOAuthLogin = { loginId: string; userCode: string; verificationUrl: string; interval: number; expiresAt: number }
 export type ProviderOAuthPoll = { status: 'pending' | 'authorized'; interval: number; auth: ProviderOAuthConfig | null }
 
@@ -1542,7 +1544,12 @@ export function isOfficialDeepSeekApi(baseUrl?: string): boolean {
   }
 }
 
-export function builtinWebSearchSupported(apiFormat?: string, baseUrl?: string): boolean {
+export function resolveProviderWebSearchMode<T extends 'off' | 'builtin' | 'third_party' | undefined>(mode: T, oauthProvider?: string): T | 'third_party' {
+  return oauthProvider === 'antigravity' && mode === 'builtin' ? 'third_party' : mode
+}
+
+export function builtinWebSearchSupported(apiFormat?: string, baseUrl?: string, oauthProvider?: string): boolean {
+  if (oauthProvider === 'antigravity') return false
   const kind = normalizeProviderApiFormat(apiFormat)
   if (
     kind === 'openai_responses' ||
@@ -1906,6 +1913,8 @@ export const api = {
     invoke<ProviderOAuthLogin>('provider_oauth_start', { provider, useSystemProxy }),
   providerOAuthPoll: (loginId: string) => invoke<ProviderOAuthPoll>('provider_oauth_poll', { loginId }),
   providerOAuthCancel: (loginId: string) => invoke<void>('provider_oauth_cancel', { loginId }),
+  providerOAuthAccount: (provider: ModelProvider) => invoke<ProviderOAuthAccount>('provider_oauth_account', { provider }),
+  providerOAuthUsage: (provider: ModelProvider) => invoke<ProviderOAuthUsage>('provider_oauth_usage', { provider }),
   providerOAuthDisconnect: (credentialId: string) => invoke<void>('provider_oauth_disconnect', { credentialId }),
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),

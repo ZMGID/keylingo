@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { ArrowLeft, RotateCcw } from 'lucide-react'
-import type { ModelInfo } from '../api/tauri'
-import { resolveModelInfo, matchModel } from '../data/modelMatching'
+import type { ModelInfo, ModelProvider } from '../api/tauri'
+import { resolveModelInfo, matchModel, providerModelDatabaseId } from '../data/modelMatching'
 import { Toggle, Input } from '../settings/components'
 import { Button, IconButton } from './Button'
 
@@ -12,6 +12,7 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 type ModelDetailDrawerProps = {
   modelName: string
+  provider?: ModelProvider
   overrides?: Record<string, ModelInfo>
   lang: Lang
   onClose: () => void
@@ -25,14 +26,15 @@ function deepEqual(a: unknown, b: unknown): boolean {
 
 export function ModelDetailDrawer({
   modelName,
+  provider,
   overrides,
   lang,
   onClose,
   onSave,
   onReset,
 }: ModelDetailDrawerProps) {
-  const resolved = resolveModelInfo(modelName, overrides)
-  const dbDefaults = matchModel(modelName)
+  const resolved = resolveModelInfo(modelName, overrides, provider)
+  const dbDefaults = matchModel(providerModelDatabaseId(modelName, provider))
   const hasOverride = !!overrides?.[modelName]
 
   const [form, setForm] = useState<ModelInfo>(resolved)
@@ -44,11 +46,11 @@ export function ModelDetailDrawer({
   )
 
   useEffect(() => {
-    const next = resolveModelInfo(modelName, overrides)
+    const next = resolveModelInfo(modelName, overrides, provider)
     setForm(next)
     setTemperatureInput(next.temperature?.toString() ?? '')
     setExtraBodyInput(next.extraBody ? JSON.stringify(next.extraBody, null, 2) : '')
-  }, [modelName, overrides])
+  }, [modelName, overrides, provider])
 
   const updateField = useCallback(<K extends keyof ModelInfo>(key: K, value: ModelInfo[K]) => {
     setForm(prev => ({ ...prev, [key]: value }))

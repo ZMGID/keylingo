@@ -462,6 +462,15 @@ pub enum WebSearchMode {
 }
 
 impl WebSearchMode {
+    /// Antigravity OAuth cannot use hosted Google Search. Preserve explicit Off.
+    pub fn for_provider(self, provider: &crate::settings::ModelProvider) -> Self {
+        if self == Self::Builtin && crate::provider_oauth::antigravity::is_provider(provider) {
+            Self::ThirdParty
+        } else {
+            self
+        }
+    }
+
     /// 解析会话的**有效**联网搜索模式（任务 07-23）。
     /// 会话未显式设置（`None`）时回退全局 `native_tools.web_search`：
     /// on ⇒ `ThirdParty`，off ⇒ `Off`，保证旧对话行为逐字节不变。

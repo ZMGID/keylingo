@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { builtinWebSearchSupported, isOfficialDeepSeekApi } from './tauri'
+import { builtinWebSearchSupported, isOfficialDeepSeekApi, resolveProviderWebSearchMode } from './tauri'
 
 describe('isOfficialDeepSeekApi', () => {
   it('matches api.deepseek.com only', () => {
@@ -11,6 +11,15 @@ describe('isOfficialDeepSeekApi', () => {
 })
 
 describe('builtinWebSearchSupported', () => {
+  it('routes only Antigravity hosted search to third-party search', () => {
+    expect(builtinWebSearchSupported('gemini', '', 'antigravity')).toBe(false)
+    expect(resolveProviderWebSearchMode('builtin', 'antigravity')).toBe('third_party')
+    expect(resolveProviderWebSearchMode('third_party', 'antigravity')).toBe('third_party')
+    expect(resolveProviderWebSearchMode('off', 'antigravity')).toBe('off')
+    expect(resolveProviderWebSearchMode('builtin')).toBe('builtin')
+    expect(resolveProviderWebSearchMode('builtin', 'codex')).toBe('builtin')
+  })
+
   it('allows Responses / Gemini / Anthropic regardless of host', () => {
     expect(builtinWebSearchSupported('openai_responses')).toBe(true)
     expect(builtinWebSearchSupported('gemini')).toBe(true)

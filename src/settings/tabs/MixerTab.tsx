@@ -66,7 +66,7 @@ export function MixerTab({
             providers={settings.providers}
             inheritLabel={t.mixerAutoVisionModel}
             filterModel={(provider, model) =>
-              resolveModelInfo(model, provider.modelOverrides).capabilities?.vision === true
+              resolveModelInfo(model, provider.modelOverrides, provider).capabilities?.vision === true
             }
             onChange={(providerId, model) => {
               onUpdateDefaultModel('vision', providerId, model)
@@ -109,7 +109,7 @@ export function MixerTab({
             providers={settings.providers}
             inheritLabel={t.mixerNoImageGenerationModel}
             filterModel={(provider, model) =>
-              resolveModelInfo(model, provider.modelOverrides).capabilities?.imageGeneration === true
+              resolveModelInfo(model, provider.modelOverrides, provider).capabilities?.imageGeneration === true
             }
             onChange={(providerId, model) => {
               onUpdateDefaultModel('imageGeneration', providerId, model)
