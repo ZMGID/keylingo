@@ -1,4 +1,5 @@
 import { type ComponentType, type ReactNode, memo, useEffect, useMemo, useRef, useState } from 'react'
+import { ChatDisclosureBody } from './ChatDisclosureBody'
 import {
   AlertCircle,
   Bot,
@@ -520,6 +521,7 @@ function ConsultCard({
         type="button"
         onClick={() => { if (hasBody) setOpen((v) => !v) }}
         aria-expanded={hasBody ? open : undefined}
+        data-chat-disclosure={hasBody || undefined}
         className={`flex w-full max-w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-left ${hasBody ? '' : 'cursor-default'}`}
         data-tauri-drag-region="false"
       >
@@ -545,10 +547,12 @@ function ConsultCard({
         )}
       </button>
 
-      {hasBody && open && (
-        <div className="chat-motion-search-reveal mt-2 space-y-2 border-t border-neutral-200 pt-2 text-[12.5px] dark:border-white/10">
-          {children}
-        </div>
+      {hasBody && (
+        <ChatDisclosureBody open={open}>
+          <div className="mt-2 space-y-2 border-t border-neutral-200 pt-2 text-[12.5px] dark:border-white/10">
+            {children}
+          </div>
+        </ChatDisclosureBody>
       )}
     </div>
   )
@@ -1832,6 +1836,7 @@ function DefaultToolCallBlock({
           if (hasDetails) setOpen((value) => !value)
         }}
         aria-expanded={hasDetails ? open : undefined}
+        data-chat-disclosure={hasDetails || undefined}
         className={`max-w-full min-w-0 inline-flex items-center gap-1.5 rounded-md py-0 text-[11.5px] transition-colors ${
           hasDetails
             ? 'hover:text-neutral-700 dark:hover:text-neutral-200'
@@ -1885,7 +1890,7 @@ function DefaultToolCallBlock({
       </button>
 
       {hasDetails && (
-        <div className={`chat-motion-reveal ${open ? 'is-open' : ''}`} aria-hidden={!open}>
+        <ChatDisclosureBody open={open}>
           <div className="mt-1.5 ml-1.5 space-y-1.5 border-l border-black/[0.08] pl-2.5 dark:border-white/[0.1]">
             {argumentPreview && (
               <div>
@@ -1897,7 +1902,7 @@ function DefaultToolCallBlock({
                 </div>
               </div>
             )}
-            {open && resultPreview && !knowledgeHits && (
+            {resultPreview && !knowledgeHits && (
               <div>
                 <div className="text-[10.5px] font-medium text-neutral-400 dark:text-neutral-500">
                   {'结果'}
@@ -1907,11 +1912,11 @@ function DefaultToolCallBlock({
                 </div>
               </div>
             )}
-            {open && knowledgeHits && <KnowledgeHits hits={knowledgeHits} />}
+            {knowledgeHits && <KnowledgeHits hits={knowledgeHits} />}
             {fileMutation && hasFileMutationDetails && (
               <FileMutationDetails mutation={fileMutation} />
             )}
-            {open && argDiff && (
+            {argDiff && (
               <div className="custom-scrollbar max-h-72 overflow-auto rounded-md border border-neutral-200/80 dark:border-neutral-700/60">
                 <pre className="font-mono text-[11px] leading-[1.5]">
                   {argDiff.split('\n').map((line, index) => (
@@ -1937,7 +1942,7 @@ function DefaultToolCallBlock({
               </div>
             )}
           </div>
-        </div>
+        </ChatDisclosureBody>
       )}
     </div>
   )
@@ -2037,6 +2042,7 @@ export function ImageReadCluster({ toolCalls }: { toolCalls: ToolCallRecord[] })
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
+        data-chat-disclosure
         className="max-w-full min-w-0 inline-flex items-center gap-1.5 rounded-md py-0 text-[11.5px] text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
       >
         <Eye
@@ -2057,12 +2063,14 @@ export function ImageReadCluster({ toolCalls }: { toolCalls: ToolCallRecord[] })
           strokeWidth={2}
         />
       </button>
-      {open && items.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {items.map((item, index) => (
-            <ImageReadThumb key={item.path || `${item.name}-${index}`} item={item} />
-          ))}
-        </div>
+      {items.length > 0 && (
+        <ChatDisclosureBody open={open}>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {items.map((item, index) => (
+              <ImageReadThumb key={item.path || `${item.name}-${index}`} item={item} />
+            ))}
+          </div>
+        </ChatDisclosureBody>
       )}
     </div>
   )

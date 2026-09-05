@@ -1118,17 +1118,15 @@ const ChatMarkdownBlock = memo(function ChatMarkdownBlock(props: BlockProps) {
   return <Block key={revisionRef.current} {...props} />
 })
 
-const FullSettledMarkdown = memo(function FullSettledMarkdown({
+const MarkdownDocument = memo(function MarkdownDocument({
   content,
   components,
   remarkPlugins,
-  useCache,
   streaming,
 }: {
   content: string
   components: Components
   remarkPlugins: PluggableList
-  useCache: boolean
   streaming: boolean
 }) {
   const normalized = useMemo(() => {
@@ -1138,33 +1136,20 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
       )
       return { normalized: normalizedContent }
     }
-    return useCache
-      ? getSettledMarkdownCacheEntry(content, build).normalized
-      : build().normalized
-  }, [content, useCache])
+    return streaming
+      ? build().normalized
+      : getSettledMarkdownCacheEntry(content, build).normalized
+  }, [content, streaming])
 
-  // Keep the document mounted; non-prefix replacement recovery is block-local.
-
-  // 对齐 LiveAgent Markdown：
-  // - 流式消息固定走 Streamdown streaming 模式（块级 memo + parseIncomplete），
-  //   不要在每个 token 上整篇 static 重解析——那会放大行高抖动。
-  // - isAnimating 跟「还在出字」绑定；animated 始终 false（不做字级动画）。
-  // - ⚠️ **落库后也不切 static。** 两种模式不是同一套解析：streaming 先按块切开、每块单独
-  //   跑一遍 react-markdown，static 整篇一次解析。跨块的语法（隔空行的松散列表、引用式链接、
-  //   脚注、续在空行后的表格……）两边结果不一样，同一段正文在 live 与落库 twin 上就会
-  //   排出两种样子 —— 用户看到的「生成完格式变一下」即来源于此，而且不是靠对齐外壳 DOM
-  //   能消掉的。要求是「流式生成时什么样，最终就是什么样」，所以整条消息终身用同一种
-  //   模式；key 也不再随 streaming 翻转，避免结束帧整树重挂。代价是历史消息也按块解析
-  //   （块级 memo，成本与流式末帧一致），对 react-markdown 来说每块都是完整文档，可接受。
+  // Keep one parser mode and document identity through completion. Static mode
+  // parses the whole document differently from streaming's memoized blocks,
+  // changing cross-block syntax and spacing. Only corrected blocks remount.
   return (
     <Streamdown
       mode="streaming"
       BlockComponent={ChatMarkdownBlock}
-      // ⚠️ 不传 dir。Streamdown 一旦拿到 dir（含 "auto"），streaming 模式会把**每个块**包进
-      // `<div dir style="display:contents">`，而 static 模式直接平铺元素。根上的 `space-y-4`
-      // 与 `[&>*:first-child]:mt-0` 打在 display:contents 包装层上是无效的（它不生成盒子），
-      // 于是流式中段落之间没有 16px 间距、首个标题保留 mt-6，落库 twin 一挂就整篇重排 ——
-      // 「生成结束格式变了一下」。文字方向交给外层 shell 的原生 dir="auto"（按首个强方向字符）。
+      // The outer shell owns dir="auto". Streamdown's dir wrappers use
+      // display:contents, which breaks the block spacing selectors.
       parseIncompleteMarkdown
       normalizeHtmlIndentation
       plugins={streamdownPlugins}
@@ -1240,11 +1225,10 @@ function ChatMarkdownComponent({
   return (
     <div className={markdownShellClass(variant)} dir="auto">
       <MarkdownErrorBoundary fallbackText={content}>
-        <FullSettledMarkdown
+        <MarkdownDocument
           content={content}
           components={components}
           remarkPlugins={remarkPlugins}
-          useCache={!streaming}
           streaming={streaming}
         />
       </MarkdownErrorBoundary>

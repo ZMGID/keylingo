@@ -71,10 +71,7 @@ export function chatMessageBodyLayoutRevision(message: ChatMessage): string {
   if (cached !== undefined) return cached
 
   const tools = message.tool_calls ?? message.toolCalls ?? []
-  // 状态走 normalizeToolCallStatus：流式事件里的工具记录是 `completed`，落库后是 `success`，
-  // ToolCallBlock 渲染前也是先归一化的 —— 原始字符串不同并不代表卡片几何不同。
-  // 直接比原始值会让 canReuseLiveRowHeight 在每一条带工具调用的回复上都判「不可复用」，
-  // twin 首帧退回估高（探针实测 +501 vs 实高 380，scrollTop 337→459→337 抖一帧）。
+  // Stream and persisted tools use different status aliases for the same layout.
   const toolRevision = tools.map((tool) => [
     tool.id,
     tool.name ?? tool.tool_name ?? tool.toolName,
@@ -93,12 +90,7 @@ export function chatMessageBodyLayoutRevision(message: ChatMessage): string {
   ].join(':')).join('|')
   const agentPlan = message.agent_plan ?? message.agentPlan
   const degraded = message.degraded
-  // 有时间线分段时 MessageBubble 只渲染 segments（顶层 content / reasoning 的 ReasoningBlock 与
-  // 「回答」区都被 !hasTimelineSegments 关掉），正文几何与这两个字符串无关。而它们在
-  // live 与落库 twin 之间确实不同 —— 后端把多步文本 / 推理拼成 content 时的分隔符与前端
-  // 流式累加的不一致（探针：content 325 vs 289、reasoning 414 vs 416，segments 逐字相同）。
-  // 只在无分段的旧式消息上才让它们参与 revision。
-  // （降级消息会按文本剔掉分段，可能退回 content 路径，保守起见仍算上正文。）
+  // Timeline segments replace top-level content/reasoning; degraded answers may fall back to them.
   const hasTimeline = (message.segments?.length ?? 0) > 0 && !degraded
   const revision = [
     hasTimeline ? 'seg' : contentRevision(message.content),
@@ -172,16 +164,6 @@ export function chatMessageLayoutRevision(message: ChatMessage): string {
   ].join('::')
   layoutRevisionByMessage.set(message, revision)
   return revision
-}
-
-/**
- * Seed the outside live row's height onto the settled twin when the body
- * matches. Footer extras (usage / stream_outcome / stats) are tens of pixels;
- * skipping the seed falls back to an estimate that can be hundreds short.
- * measureElement / RO add the footer delta on the next frame.
- */
-export function canReuseLiveRowHeight(live: ChatMessage, settled: ChatMessage): boolean {
-  return chatMessageBodyLayoutRevision(live) === chatMessageBodyLayoutRevision(settled)
 }
 
 /**

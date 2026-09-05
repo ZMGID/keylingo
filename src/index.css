@@ -2028,24 +2028,6 @@ button.chat-composer-status-item:hover {
   overflow: hidden;
 }
 
-.chat-motion-reasoning-body {
-  overflow: hidden;
-  transition:
-    max-height var(--kv-dur-normal) var(--kv-ease-standard),
-    opacity 160ms var(--kv-ease-out),
-    transform 180ms var(--kv-ease-standard);
-}
-
-.chat-motion-reasoning-body.is-collapsed {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-
-.chat-motion-reasoning-body.is-open {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 .image-generation-pending {
   width: min(360px, calc(100vw - 3rem));
   max-width: 100%;
@@ -2770,8 +2752,7 @@ button.chat-composer-status-item:hover {
     animation: none;
   }
 
-  .chat-motion-reveal,
-  .chat-motion-reasoning-body {
+  .chat-motion-reveal {
     transition: none;
     transform: none;
   }
@@ -2813,11 +2794,6 @@ button.chat-composer-status-item:hover {
 
   .chat-motion-reveal:not(.is-open) {
     display: none;
-  }
-
-  .chat-motion-reasoning-body.is-collapsed,
-  .chat-motion-reasoning-body.is-open {
-    max-height: none;
   }
 
   .image-generation-pending-indicator {

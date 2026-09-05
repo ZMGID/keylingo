@@ -8,7 +8,7 @@ describe('ReasoningBlock', () => {
   it('renders a completed collapsed body at zero height on the first paint', () => {
     const html = renderToString(<ReasoningBlock reasoning="hidden until expanded" />)
     expect(html).toContain('aria-hidden="true"')
-    expect(html).toContain('max-height:0px')
+    expect(html).toContain('height:0')
   })
 
   it('renders section shell without a scroll body for empty reasoning', () => {
@@ -31,7 +31,7 @@ describe('ReasoningBlock', () => {
     // 流式中若给 body 写 max-height，CSS 过渡会让内容高度逐帧变化（实测一次收起 18 帧），
     // 消息区的 ResizeObserver 钉底会逐帧重写 scrollTop —— 表现为整屏抖动。
     const { rerender, container } = render(<ReasoningBlock reasoning="alpha" streaming />)
-    const body = container.querySelector('.chat-motion-reasoning-body') as HTMLElement
+    const body = container.querySelector('[data-chat-disclosure-body]') as HTMLElement
     expect(body.style.maxHeight).toBe('')
 
     rerender(<ReasoningBlock reasoning={'alpha\nbeta\ngamma'} streaming />)

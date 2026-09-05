@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { ChatDisclosureBody } from './ChatDisclosureBody'
 
 type ReasoningBlockProps = {
   reasoning: string
@@ -20,11 +21,9 @@ function formatThinkingDuration(durationMs: number | null | undefined): string {
 export function ReasoningBlock({ reasoning, streaming = false, durationMs = null }: ReasoningBlockProps) {
   const collapsible = reasoning.trim().length > 0
   const [open, setOpen] = useState(false)
-  const [bodyMaxHeight, setBodyMaxHeight] = useState<number | null>(null)
   const [liveDurationMs, setLiveDurationMs] = useState(0)
   const userExpandedRef = useRef(false)
   const durationStartedAtRef = useRef<number | null>(null)
-  const bodyRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const showCollapsed = collapsible && !open
@@ -58,19 +57,6 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
     }
   }, [streaming, collapsible])
 
-  // 流式期间不要测量 max-height：思考文本每个 delta 都在增删，重设 max-height 会重启一段
-  // 缓动过渡，内容高度于是逐帧变化（实测一次收起跑 18 帧、1061→919px）。消息区的钉底跟随
-  // 由 ResizeObserver 驱动，每一帧都会被当成内容增长而重钉一次 scrollTop —— 表现为流式时
-  // 整个消息区抖动、像被强制滚动。折叠/展开是离散的用户操作，仍走动画。
-  useEffect(() => {
-    const body = bodyRef.current
-    if (!body || !collapsible || streaming) {
-      setBodyMaxHeight(null)
-      return
-    }
-    setBodyMaxHeight(hideBody ? 0 : body.scrollHeight)
-  }, [collapsible, open, reasoning, hideBody, streaming])
-
   useEffect(() => {
     if (!streaming || hideBody) return
     const scrollBox = scrollRef.current
@@ -80,11 +66,6 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
 
   const titleClass =
     'mb-1 flex w-full items-center gap-1 text-left text-[11.5px] font-medium text-neutral-700 transition-colors dark:text-neutral-200'
-  const bodyClass = [
-    'chat-motion-reasoning-body',
-    streaming ? 'opacity-95' : 'opacity-90',
-    showCollapsed ? 'is-collapsed' : 'is-open',
-  ].join(' ')
   const scrollClass = [
     'reasoning-scroll-box custom-scrollbar',
     streaming ? 'is-streaming' : 'is-expanded',
@@ -113,6 +94,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
           onClick={handleToggle}
           className={`${titleClass} hover:text-neutral-900 dark:hover:text-neutral-50`}
           aria-expanded={!hideBody}
+          data-chat-disclosure
           data-tauri-drag-region="false"
         >
           <span className="inline-flex min-w-0 items-baseline gap-1.5">
@@ -145,16 +127,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
         </div>
       )}
 
-      <div
-        ref={bodyRef}
-        className={bodyClass}
-        aria-hidden={hideBody}
-        style={
-          bodyMaxHeight == null
-            ? (hideBody ? { maxHeight: '0px' } : undefined)
-            : { maxHeight: `${bodyMaxHeight}px` }
-        }
-      >
+      <ChatDisclosureBody open={!hideBody} animate={!streaming && userExpandedRef.current} keepMounted>
         {collapsible && (
           <div data-testid="reasoning-frame" className="reasoning-scroll-frame">
             <div
@@ -168,7 +141,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
             </div>
           </div>
         )}
-      </div>
+      </ChatDisclosureBody>
     </section>
   )
 }

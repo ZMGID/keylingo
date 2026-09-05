@@ -26,6 +26,7 @@ import { loadArtifactDataUrl } from './attachmentPreview'
 import { openChatImageViewer } from './imageViewer'
 import { ChatInlineImage, CHAT_IMAGE_TILE_MAX_PX } from './ChatInlineImage'
 import { ReasoningBlock } from './ReasoningBlock'
+import { ChatDisclosureBody } from './ChatDisclosureBody'
 import { ModelIcon } from './ModelIcon'
 import { ToolCallBlock, ImageReadCluster } from './ToolCallBlock'
 import { ToolCallErrorBoundary } from './ToolCallErrorBoundary'
@@ -699,7 +700,7 @@ function renderProcessSegments({
  * 一轮过程 = 一个 Codex 式 Working 壳。
  * - 「生成中」= 这条消息还在流式、且这是末组：始终展开，避免抖动。
  * - 后面出现终稿/standalone（非末组）或流式结束 → 收成一行 Worked for Xs。
- * - 用户手动点过开关后以用户操作为准（userToggledRef）。
+ * - 用户手动点过开关后以用户操作为准。
  * - 折叠态只留 header，不挂组内 ReasoningBlock / ToolCallBlock / 过程旁白。
  */
 function TimelineGroupBlock({
@@ -739,31 +740,16 @@ function TimelineGroupBlock({
     [segments, toolCalls, toolCallById, reasoningDurationMs],
   )
   const title = workingGroupTitle(generating, durationMs)
-  const [open, setOpen] = useState(generating)
-  const userToggledRef = useRef(false)
-
-  // 自动折叠不能等 effect：生成结束后的第一次 render 仍可能带着旧的 open=true，
-  // 先把整棵 ToolCallBlock/Markdown 子树创建出来，effect 下一拍才卸载。用当前生成态
-  // 直接参与渲染，保证结束这一帧就不创建详情树；用户手动操作后再由 open 接管。
-  const renderDetails = userToggledRef.current ? open : generating
-
-  // 生成中默认展开、完成自动折叠；用户手动操作后不再覆盖。
-  useEffect(() => {
-    if (userToggledRef.current) return
-    setOpen(generating)
-  }, [generating])
-
-  const handleToggle = () => {
-    userToggledRef.current = true
-    setOpen((value) => !value)
-  }
+  const [userOpen, setUserOpen] = useState<boolean | null>(null)
+  const renderDetails = userOpen ?? generating
 
   return (
     <section aria-label="过程分组" className="not-prose">
       <button
         type="button"
-        onClick={handleToggle}
+        onClick={() => setUserOpen(current => !(current ?? generating))}
         aria-expanded={renderDetails}
+        data-chat-disclosure
         data-tauri-drag-region="false"
         className="mb-1 flex w-full items-center gap-1.5 text-left text-[12px] leading-relaxed font-medium text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
       >
@@ -794,8 +780,8 @@ function TimelineGroupBlock({
           )}
         </div>
       </button>
-      {renderDetails && (
-        <div className="chat-motion-reveal is-open" aria-hidden={false}>
+      <ChatDisclosureBody open={renderDetails} animate={userOpen !== null}>
+        {() => (
           <div className="space-y-1.5">
             {/* A new tool can move existing commentary into this group. Keep
                 those segments visible instead of replaying opacity from zero. */}
@@ -811,8 +797,8 @@ function TimelineGroupBlock({
               reasoningSegmentCount,
             })}
           </div>
-        </div>
-      )}
+        )}
+      </ChatDisclosureBody>
     </section>
   )
 }
@@ -1212,6 +1198,7 @@ function MessageBubbleComponent({
                 onClick={() => setToolsExpanded((value) => !value)}
                 className="mb-1 flex w-full items-center gap-1 text-left text-[11px] font-medium text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
                 aria-expanded={toolsExpanded}
+                data-chat-disclosure
                 data-tauri-drag-region="false"
               >
                 <span>
@@ -1223,14 +1210,14 @@ function MessageBubbleComponent({
                 工具调用
               </div>
             )}
-            {toolsCollapsible && toolsExpanded && (
-              <div className="chat-motion-reveal is-open">
+            {toolsCollapsible && (
+              <ChatDisclosureBody open={toolsExpanded}>
                 <ClusteredToolCalls
                   toolCalls={toolCalls}
                   artifacts={renderArtifacts}
                   conversationId={conversationId}
                 />
-              </div>
+              </ChatDisclosureBody>
             )}
             {!toolsCollapsible && (
               <ClusteredToolCalls

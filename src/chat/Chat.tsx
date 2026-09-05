@@ -1042,24 +1042,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     return true
   }, [cancelPendingFrame, syncGeneratingConversationIds])
 
-  /**
-   * run 收尾时的预览清除（两条收尾路径共用）。⚠️ 不能直接 clearStreamingPreview：
-   * 它的 store 更新走 SyncLane（useSyncExternalStore 防撕裂强制同步刷新），会抢在
-   * applyConversation 的 setState（DefaultLane）/ reloadConversation 的 startTransition
-   * 之前**单独提交一帧** —— 那一帧 live 已卸载、落库 twin 还没进已提交的 messages，
-   * 整条回答消失又出现（实测 Δsh −294～−4288、scrollTop 被钳，就是「生成完闪/沉」）。
-   * 同一同步代码块里先调 applyConversation 也没用，lane 优先级会把顺序反转。
-   * twin 尚未出现在**已提交**的 messages（currentConversationRef 在 render 期赋值，
-   * 语义即「已渲染的会话」）时，先冻结预览 —— 冻结同样是 SyncLane 先上屏，但
-   * frozen=true 让 live 气泡留在原地，那一帧无害；等 pendingPreviewClear effect 看到
-   * twin 真正落地再清，live→twin 就是同一 commit 的原子交换。
+  /** Freeze the visible preview until the committed conversation contains its answer.
+   * The external store can flush before the conversation's React state update.
    */
   const settleStreamingPreview = useCallback((conversationId: string) => {
-    // ⚠️ 只看 store（屏幕上正在展示的 live 预览），不读 streamSnapshotsRef：两条收尾路径
-    // （finishStreamingRun / finishStreamingRunWithConversation）都在调用这里**之前**
-    // clearConversationLocalState 把 ref 里的快照删了，从 ref 取 twinId 永远是 null →
-    // 被判成「已落地」→ 直接 clear → 冻结路径从未生效，闪帧一直在（探针实测：无 frozen 帧，
-    // live 卸载与 twin 挂载差一帧，scrollTop 195→503→263）。
+    // Completion already removed the per-conversation snapshot; read the visible store.
     const shown = getStreamSnapshot()
     if (!hasStreamPreview(shown)) {
       clearStreamingPreview()

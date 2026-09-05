@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Virtualizer } from '@tanstack/react-virtual'
 import {
-  canReuseLiveRowHeight,
+  chatMessageBodyLayoutRevision,
   chatMessageLayoutRevision,
   contentRevision,
   clearRowMeasurementCache,
@@ -42,12 +42,12 @@ describe('message layout revision', () => {
       .not.toBe(chatMessageLayoutRevision(base))
   })
 
-  it('正文相同则继承 live 高度，页脚 usage/终止态交给测高补', () => {
+  it('正文 revision 不包含完成状态和页脚统计', () => {
     const live = assistant()
-    expect(canReuseLiveRowHeight(live, assistant({ stream_outcome: 'interrupted' }))).toBe(true)
-    expect(canReuseLiveRowHeight(live, assistant({ usage: { input_tokens: 10, output_tokens: 20 } }))).toBe(true)
-    expect(canReuseLiveRowHeight(live, assistant({ content: '回答已补全' }))).toBe(false)
-    expect(canReuseLiveRowHeight(live, assistant())).toBe(true)
+    const revision = chatMessageBodyLayoutRevision(live)
+    expect(chatMessageBodyLayoutRevision(assistant({ stream_outcome: 'interrupted' }))).toBe(revision)
+    expect(chatMessageBodyLayoutRevision(assistant({ usage: { input_tokens: 10, output_tokens: 20 } }))).toBe(revision)
+    expect(chatMessageBodyLayoutRevision(assistant({ content: '回答已补全' }))).not.toBe(revision)
   })
 
   it('有时间线分段时，顶层 content/reasoning 的拼接差异不影响 live 高度复用', () => {
@@ -58,12 +58,12 @@ describe('message layout revision', () => {
     const live = assistant({ segments, content: '回答', reasoning: '想一想' })
     // 后端落库时用 "\n\n" 拼多步文本 / 推理，与前端流式累加的字符串不同
     const settled = assistant({ segments, content: '回答\n\n', reasoning: '想一想\n\n' })
-    expect(canReuseLiveRowHeight(live, settled)).toBe(true)
+    expect(chatMessageBodyLayoutRevision(settled)).toBe(chatMessageBodyLayoutRevision(live))
     // 分段本身变了才算正文变了
     const changed = assistant({
       segments: [segments![0]!, { ...segments![1]!, text: '回答已补全' }],
     })
-    expect(canReuseLiveRowHeight(live, changed)).toBe(false)
+    expect(chatMessageBodyLayoutRevision(changed)).not.toBe(chatMessageBodyLayoutRevision(live))
   })
 
   it('工具状态 completed（流式）与 success（落库）视为同一几何', () => {
@@ -79,12 +79,12 @@ describe('message layout revision', () => {
       segments,
       tool_calls: [{ id: 'c1', name: 'read_file', source: 'native', status: 'success' }],
     })
-    expect(canReuseLiveRowHeight(live, settled)).toBe(true)
+    expect(chatMessageBodyLayoutRevision(settled)).toBe(chatMessageBodyLayoutRevision(live))
     const failed = assistant({
       segments,
       tool_calls: [{ id: 'c1', name: 'read_file', source: 'native', status: 'error' }],
     })
-    expect(canReuseLiveRowHeight(live, failed)).toBe(false)
+    expect(chatMessageBodyLayoutRevision(failed)).not.toBe(chatMessageBodyLayoutRevision(live))
   })
 
   it('同长度中间改写会换测量 key', () => {

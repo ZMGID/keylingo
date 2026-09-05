@@ -42,8 +42,7 @@ export function beginMessageNavigationHydrate(): number {
 
 /**
  * 流式 live → 历史气泡 的短窗 eager。
- * 必须在「streaming 变 false 的同一次 render」里同步调用，
- * 这样本帧新挂上的 DeferredCodeBlock 初始化就能读到 flag。
+ * 在结束交接的 layout effect 中开启，保证内容在绘制前完成 hydrate。
  */
 export const STREAM_SETTLE_EAGER_MS = 800
 
