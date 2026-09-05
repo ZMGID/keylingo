@@ -10,7 +10,8 @@ pub fn create_stream_handler(format: StreamFormat) -> StreamHandler {
         StreamFormat::ClaudeStreamJson => StreamHandler(claude::ClaudeStreamState::default()),
         // PiRpc / AcpJsonRpc / CodexAppServer / DshJsonRpc are driven by dedicated session
         // runners in run.rs and never reach this factory.
-        StreamFormat::PiRpc
+        StreamFormat::AntigravityStreamJson
+        | StreamFormat::PiRpc
         | StreamFormat::AcpJsonRpc
         | StreamFormat::CodexAppServer
         | StreamFormat::DshJsonRpc => {
