@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { matchModel, matchModelExact, resolveModelInfo } from './modelMatching'
 
 describe('matchModel', () => {
+  it('resolves all eight OpenCode free variants without inheriting paid limits or prices', () => {
+    for (const id of ['big-pickle', 'deepseek-v4-flash-free', 'ling-3.0-flash-fin-free', 'mimo-v2.5-free', 'muse-spark-1.2-contributor-free', 'muse-spark-1.3-contributor-free', 'nemotron-3-ultra-free', 'nemotron-3.5-lightning-free']) {
+      const info = matchModelExact(id)
+      expect(info, id).not.toBeNull()
+      expect(info?.pricing?.input).toBe(0)
+      expect(info?.pricing?.output).toBe(0)
+      expect(matchModel(`opencode/${id}`)).toEqual(info)
+    }
+    expect(matchModelExact('muse-spark-1.3-contributor-free')?.maxOutput).toBe(131072)
+    expect(matchModelExact('muse-spark-1.3-contributor')?.pricing?.input).toBeGreaterThan(0)
+    expect(matchModelExact('deepseek-v4-flash-free')?.contextWindow).toBe(200000)
+    expect(matchModelExact('nemotron-3.5-lightning-free')?.reasoningEfforts).toEqual([])
+  })
+
   it('resolves Kimi Code short IDs only with provider context and preserves overrides', () => {
     const provider = { baseUrl: 'https://api.kimi.com/coding/v1' }
     expect(resolveModelInfo('k3', undefined, provider).displayName).toBe('Kimi K3')

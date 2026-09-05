@@ -8,6 +8,18 @@ import {
 } from './ModelIcon'
 
 describe('ModelIcon model→brand mapping', () => {
+  it('covers the OpenCode free catalog with the correct known brands', () => {
+    expect(matchGlyph('muse-spark-1.3-contributor-free')).toBe(PROVIDER_BRANDS.Meta)
+    expect(matchGlyph('muse-spark-1.2-contributor-free')).toBe(PROVIDER_BRANDS.Meta)
+    expect(matchGlyph('nemotron-3-ultra-free')).toBe(PROVIDER_BRANDS.Nvidia)
+    expect(matchGlyph('nemotron-3.5-lightning-free')).toBe(PROVIDER_BRANDS.Nvidia)
+    expect(matchGlyph('big-pickle')).toBe(PROVIDER_BRANDS.OpenCode)
+    expect(matchGlyph('ling-3.0-flash-fin-free')).not.toBeNull()
+    expect(matchGlyph('deepseek-v4-flash-free')).toBe(PROVIDER_BRANDS.DeepSeek)
+    expect(matchGlyph('mimo-v2.5-free')).not.toBeNull()
+    expect(matchGlyph('spelling-model')).toBeNull()
+  })
+
   it('matches common model families', () => {
     const cases = [
       'gpt-4o', 'o3-mini', 'claude-3-5-sonnet', 'gemini-2.0-flash', 'gemma-2',

@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-09-05",
+    "version": "2026-09-06",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://help.aliyun.com/en/model-studio/qwen3-8-max",
@@ -2482,5 +2482,157 @@
     "maxOutput": 0,
     "capabilities": { "embedding": true },
     "dimensions": 1024
+  },
+  "big-pickle": {
+    "displayName": "Big Pickle",
+    "contextWindow": 200000,
+    "maxOutput": 32000,
+    "capabilities": {
+      "vision": false,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "deepseek-v4-flash-free": {
+    "displayName": "DeepSeek V4 Flash Free",
+    "contextWindow": 200000,
+    "maxOutput": 128000,
+    "capabilities": {
+      "vision": false,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [
+      "low",
+      "high",
+      "max"
+    ],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "ling-3.0-flash-fin-free": {
+    "displayName": "Ling 3.0 Flash Fin Free",
+    "contextWindow": 262144,
+    "maxOutput": 32768,
+    "capabilities": {
+      "vision": false,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "mimo-v2.5-free": {
+    "displayName": "MiMo V2.5 Free",
+    "contextWindow": 200000,
+    "maxOutput": 32000,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "muse-spark-1.2-contributor-free": {
+    "displayName": "Muse Spark 1.2 Contributor Free",
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "muse-spark-1.3-contributor-free": {
+    "displayName": "Muse Spark 1.3 Contributor Free",
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "nemotron-3-ultra-free": {
+    "displayName": "Nemotron 3 Ultra Free",
+    "contextWindow": 1000000,
+    "maxOutput": 128000,
+    "capabilities": {
+      "vision": false,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
+  },
+  "nemotron-3.5-lightning-free": {
+    "displayName": "Nemotron 3.5 Lightning Free",
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "capabilities": {
+      "vision": false,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true
+    },
+    "reasoningEfforts": [],
+    "pricing": {
+      "input": 0,
+      "output": 0,
+      "cachedInput": 0
+    }
   }
 }

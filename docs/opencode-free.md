@@ -9,3 +9,9 @@ Anonymous mode applies only to the exact official HTTPS Zen endpoint using the c
 References inspected on 2026-09-06: installed [Hermes provider implementation](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/models.py), [OpenCode endpoint documentation](https://opencode.ai/docs/zen/) and the [live model catalog](https://opencode.ai/zen/v1/models). The integration is independently implemented using Kivio's existing HTTP transport and model picker.
 
 Live verification: anonymous `big-pickle` returned HTTP 200 with streaming chat chunks. `deepseek-v4-flash-free` was listed but returned an upstream “Model is unavailable” error. A Python default user agent was rejected with HTTP 403; the explicit Kivio user agent reached inference successfully. No account credentials were used.
+
+## Model metadata and icons
+
+The eight current free IDs now have exact database entries based on the OpenCode provider in models.dev, including gateway-specific limits, zero token pricing and supported reasoning-effort choices. The inspected source fields are retained in `research/opencode-free-models-2026-09-06.json`. These entries take precedence over paid-model prefix matches; for example Muse Contributor Free has a 131072-token output limit, and DeepSeek V4 Flash Free has a 200000-token context. The upstream catalog remains the source for availability, including models that the metadata registry marks deprecated.
+
+Muse uses the Meta icon, Nemotron uses NVIDIA, Ling uses Ant Group, and the opaque Big Pickle model uses its OpenCode host icon without guessing its underlying model vendor. Existing MiMo and DeepSeek icons are retained. Verification: 55 focused frontend tests cover exact/free pricing matches, icon mapping and model selection.

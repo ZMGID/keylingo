@@ -15,6 +15,7 @@ import Zhipu from '@lobehub/icons/es/Zhipu/components/Color'
 import KimiMono from '@lobehub/icons/es/Kimi/components/Mono'
 import Mistral from '@lobehub/icons/es/Mistral/components/Color'
 import Meta from '@lobehub/icons/es/Meta/components/Color'
+import AntGroup from '@lobehub/icons/es/AntGroup/components/Color'
 import Yi from '@lobehub/icons/es/Yi/components/Color'
 import Doubao from '@lobehub/icons/es/Doubao/components/Color'
 import Wenxin from '@lobehub/icons/es/Wenxin/components/Color'
@@ -132,7 +133,10 @@ const MODEL_ICON_MAP: Array<[RegExp, Glyph]> = [
   [/moonshot/, G(Moonshot)],
   [/glm|chatglm|zhipu|ox-alpha/, G(Zhipu)],
   [/mistral|mixtral|codestral|pixtral|ministral|magistral|devstral/, G(Mistral)],
-  [/llama|llava/, G(Meta)],
+  [/llama|llava|muse-spark/, G(Meta)],
+  [/nemotron/, G(Nvidia)],
+  [/(?:^|[-/])ling-/, G(AntGroup)],
+  [/(?:^|\/)big-pickle$/, G(OpenCode)],
   [/(?:^|[-/])yi-/, G(Yi)],
   [/doubao|seedream|(?:^|[-/])seed-[12]/, G(Doubao)],
   [/ernie|wenxin/, G(Wenxin)],
