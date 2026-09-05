@@ -2,7 +2,9 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { InputBar } from './InputBar'
 
-const optimizePrompt = vi.fn(async (text: string, _conversationId?: string | null) => `${text.trim()}（已优化）`)
+const optimizePrompt = vi.fn<(text: string, conversationId?: string | null) => Promise<string>>(
+  async (text) => `${text.trim()}（已优化）`,
+)
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 vi.mock('@tauri-apps/api/webview', () => ({
