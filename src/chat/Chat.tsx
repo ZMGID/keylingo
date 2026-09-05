@@ -186,8 +186,6 @@ import {
   userPromptEventToRecord,
 } from './streamApply'
 import {
-  isClaudePlanApproval,
-  isCursorPlanApproval,
   isEnterPlanApproval,
   isPlanApproval,
   PLAN_APPROVAL_ACTIONS,
@@ -2372,11 +2370,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // structuredContent.subagentProgress, addressed by parentToolCallId.
   // 流状态行的瞬态一行字（上游重试等）：写进会话流快照，StreamStatusLine 每秒读。
   // 清除有两条路：后端显式 note=null，或正文/思考恢复流动（onChatStream 的 delta 分支）。
-  useTauriEvent(api.onChatQueuedTextsRestored, (payload) => {
-    if (popoutConversationIdsRef.current.has(payload.conversationId)) return
-    messageQueueRef.current.restoreClearedQueue(payload.conversationId, payload.texts)
-  }, [])
-
   useTauriEvent(api.onChatStatusNote, (payload) => {
     const snapshot = streamSnapshotsRef.current[payload.conversationId]
     if (!snapshot) return
@@ -5117,7 +5110,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
             detail={pendingToolConfirm.argumentsPreview}
             error={toolConfirmError}
-            actions={isClaudePlanApproval(pendingToolConfirm)
+            actions={isPlanApproval(pendingToolConfirm)
               ? [
                 {
                   label: '拒绝 / 让它改',
@@ -5142,21 +5135,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                   },
                 })),
               ]
-              : isCursorPlanApproval(pendingToolConfirm)
-                ? [
-                  {
-                    label: '拒绝 / 让它改',
-                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
-                    onSelect: () => { void resolvePendingToolConfirm(false) },
-                  },
-                  {
-                    label: '批准',
-                    primary: true,
-                    hint: 'Ctrl+↵',
-                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
-                    onSelect: () => { void resolvePendingToolConfirm(true) },
-                  },
-                ]
               : isEnterPlanApproval(pendingToolConfirm)
                 ? [
                   {

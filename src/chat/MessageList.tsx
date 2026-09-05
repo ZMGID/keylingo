@@ -1933,7 +1933,7 @@ function MessageListBase({
         </div>
       )}
       {(messages.length > 0 || streaming) && (
-        <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} lang={lang} />
+        <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
       )}
       <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
     </div>
