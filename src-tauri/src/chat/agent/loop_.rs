@@ -270,12 +270,6 @@ pub async fn run_agent_loop(
     state
         .skill_cache
         .set_project_cwd(config.skill_project_cwd.clone());
-    let env = LoopEnv {
-        config: &config,
-        host,
-        executor,
-    };
-
     let hooks = host.hooks();
     // agent_start 在 guard 之前发：guard 的 Drop 负责成对的 agent_end。
     if let Some(hooks) = hooks {
@@ -289,6 +283,56 @@ pub async fn run_agent_loop(
     };
 
     let tool_loop_ran = !state.tools.is_empty();
+    let resumed = state
+        .runtime_messages
+        .iter()
+        .any(|m| m["role"] == "assistant");
+    let mut hook_context = crate::chat::workflow_hooks::start_context(
+        host,
+        &config.conversation_id,
+        config.generation,
+        resumed,
+        config.depth > 0,
+    )
+    .await?;
+    if config.depth == 0 {
+        if let Some(runtime) = host.workflow_hooks().filter(|r| !r.hooks.is_empty()) {
+            let mut input = runtime.input("UserPromptSubmit", &config.conversation_id);
+            input["prompt"] = serde_json::json!(runtime.prompt.as_deref().unwrap_or(""));
+            let outcome = crate::chat::workflow_hooks::run_for_host(
+                host,
+                "UserPromptSubmit",
+                input,
+                &config.conversation_id,
+                config.generation,
+            )
+            .await?;
+            if let Some(reason) = outcome.denied {
+                return Err(reason);
+            }
+            crate::chat::workflow_hooks::remember_context(
+                runtime,
+                &config.conversation_id,
+                &outcome.context,
+            )
+            .await;
+            hook_context.extend(outcome.context);
+        }
+    }
+    crate::chat::workflow_hooks::inject_context(&mut state.runtime_messages, &hook_context);
+    if !hook_context.is_empty() {
+        config
+            .provider_tools_fallback_system_prompt
+            .push_str(&format!(
+                "\n\n[Workflow hook context]\n{}",
+                hook_context.join("\n\n")
+            ));
+    }
+    let env = LoopEnv {
+        config: &config,
+        host,
+        executor,
+    };
     if tool_loop_ran {
         let mut round = 0u32;
         loop {
@@ -313,7 +357,7 @@ pub async fn run_agent_loop(
 
             // 用户在生成期间点了「立刻引导」：轮次边界是唯一安全的注入点（上一轮的工具结果
             // 已经落进历史，本轮还没开始调模型）。信箱为空时零开销。
-            inject_steering_messages(&env, &mut state, round);
+            inject_steering_messages(&env, &mut state, round).await?;
 
             let planned = match planning_step(&env, &mut state, round).await? {
                 PlanningStepOutcome::FinalAnswer => {
@@ -329,7 +373,7 @@ pub async fn run_agent_loop(
                         if let Some(message) = state.planning_final_message.take() {
                             absorb_final_answer(&mut state, message);
                         }
-                        inject_follow_up_messages(&env, &mut state, round);
+                        inject_follow_up_messages(&env, &mut state, round).await?;
                         continue;
                     }
                     break;

@@ -3265,6 +3265,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-store",
+ "tempfile",
  "tokio",
  "toml 0.8.2",
  "ts-rs",

@@ -9,6 +9,9 @@ use super::execute::ToolExecutionContext;
 pub type AgentHostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait AgentHost: Send + Sync {
+    fn workflow_hooks(&self) -> Option<&crate::chat::workflow_hooks::Runtime> {
+        None
+    }
     fn emit_stream_delta(
         &self,
         conversation_id: &str,

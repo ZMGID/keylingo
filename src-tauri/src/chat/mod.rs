@@ -8,6 +8,7 @@ pub mod dsml_tools;
 pub mod export;
 pub mod gc;
 pub mod hooks;
+pub mod workflow_hooks;
 mod image_collage;
 pub mod image_generation;
 mod image_prep;

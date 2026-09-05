@@ -42,6 +42,37 @@ pub fn load_agent_definitions(
     project_root: Option<&Path>,
 ) -> Vec<AgentDefinition> {
     let mut defs = builtin_agent_definitions();
+    for plugin in crate::plugins::packages::active() {
+        for path in crate::plugins::packages::markdown_files(&plugin.agents) {
+            if let Ok(raw) = crate::plugins::packages::component_markdown(&path) {
+                let fallback = path.file_stem().and_then(|s| s.to_str()).unwrap_or("agent");
+                if let Some(mut def) = parse::parse_agent_markdown(
+                    fallback,
+                    &raw,
+                    "plugin",
+                    Some(path.display().to_string()),
+                ) {
+                    def.id = format!("pkg-{}-{}", plugin.package.id, def.id);
+                    def.system_prompt = plugin.expand_body(&def.system_prompt);
+                    def.tools = def
+                        .tools
+                        .iter()
+                        .map(|name| plugin_tool_name(name))
+                        .collect();
+                    def.disallowed_tools = def
+                        .disallowed_tools
+                        .iter()
+                        .map(|name| plugin_tool_name(name))
+                        .collect();
+                    if def.model.as_deref() == Some("inherit") {
+                        def.model = None;
+                    }
+                    def.name = format!("{}:{}", plugin.package.name, def.name);
+                    upsert(&mut defs, def);
+                }
+            }
+        }
+    }
 
     if let Ok(dir) = user_agents_dir(app) {
         merge_dir(&mut defs, &dir, "user");
@@ -50,6 +81,20 @@ pub fn load_agent_definitions(
         merge_dir(&mut defs, &root.join(".kivio").join("agents"), "project");
     }
     defs
+}
+
+fn plugin_tool_name(name: &str) -> String {
+    match name {
+        "Bash" => "bash",
+        "Read" => "read",
+        "Write" => "write",
+        "Edit" => "edit",
+        "Glob" => "glob",
+        "Grep" => "grep",
+        "Agent" | "Task" => "agent",
+        other => other,
+    }
+    .into()
 }
 
 /// Find a definition by id or (case-insensitive) name.

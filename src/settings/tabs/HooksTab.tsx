@@ -6,6 +6,7 @@ import { i18n, type I18n, type Lang } from '../i18n'
 import { SettingsGroup, Toggle } from '../components'
 import { Button, IconButton } from '../../components/Button'
 import { HookModal } from '../HookModal'
+import { WorkflowHooksPanel } from '../WorkflowHooksPanel'
 
 type PhaseKey = 'agent' | 'turn' | 'message' | 'tool'
 
@@ -92,6 +93,7 @@ export function HooksTab({ lang, hooks, onChange }: {
 
   return (
     <>
+      <WorkflowHooksPanel lang={lang} />
       <SettingsGroup title={t.hooksSectionTitle}>
         <div className="mb-3 flex items-start justify-between gap-3">
           <p className="kv-row-desc max-w-[560px]">{t.hooksSectionHint}</p>

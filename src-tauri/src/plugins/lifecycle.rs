@@ -40,13 +40,30 @@ pub fn disable_mcp_for_plugins(settings: &mut Settings, plugin_ids: &[&str]) -> 
 }
 
 pub fn heal_disabled_plugin_mcp(state: &AppState) -> bool {
+    let package_changed = {
+        let mut settings = state.settings_write();
+        let mut changed = false;
+        for server in &mut settings.chat_tools.servers {
+            if let Some(id) = server
+                .id
+                .strip_prefix("plugin-package-")
+                .and_then(|s| s.get(..36))
+            {
+                if server.enabled && !super::packages::owner_enabled(id) {
+                    server.enabled = false;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    };
     let disabled: Vec<&str> = PLUGIN_CATALOG
         .iter()
         .filter(|plugin| plugin.mcp.is_some() && !is_enabled(plugin.id))
         .map(|plugin| plugin.id)
         .collect();
     if disabled.is_empty() {
-        return false;
+        return package_changed;
     }
     let needs = {
         let guard = state.settings_read();
@@ -60,10 +77,10 @@ pub fn heal_disabled_plugin_mcp(state: &AppState) -> bool {
         })
     };
     if !needs {
-        return false;
+        return package_changed;
     }
     let mut guard = state.settings_write();
-    disable_mcp_for_plugins(&mut guard, &disabled)
+    disable_mcp_for_plugins(&mut guard, &disabled) || package_changed
 }
 
 pub fn heal_and_persist_disabled_plugin_mcp(app: &AppHandle, state: &AppState) {
@@ -93,6 +110,9 @@ pub fn skill_owned_by_plugin(skill_id: &str) -> Option<&'static str> {
 
 /// 插件附属 skill 是否应对 agent / 列表可见：仅「已安装且启用」时 true。
 pub fn plugin_skill_available(skill_id: &str) -> bool {
+    if let Some(rest) = skill_id.strip_prefix("pkg-") {
+        return rest.get(..36).is_some_and(super::packages::owner_enabled);
+    }
     match skill_owned_by_plugin(skill_id) {
         None => true, // 非插件 skill，不由本门闸拦截
         Some(plugin_id) => is_enabled(plugin_id) && is_installed(plugin_id),

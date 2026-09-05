@@ -224,7 +224,9 @@
       <a class="item" href="#/knowledge" data-page="knowledge">知识库</a>
       <a class="item" href="#/sandbox" data-page="sandbox">代码沙箱</a>
       <a class="item" href="#/dock" data-page="dock">右侧 Dock</a>
-      <a class="item" href="#/hooks" data-page="hooks">生命周期 Hooks</a>
+      <a class="item" href="#/plugins" data-page="plugins">插件与格式</a>
+      <a class="item" href="#/workflow-hooks" data-page="workflow-hooks">工作流 Hooks</a>
+      <a class="item" href="#/hooks" data-page="hooks">通知 Hooks</a>
     </div>
     <div class="group">
       <div class="group-label">屏幕工具</div>
@@ -277,7 +279,9 @@
           <tr><td><a href="#/knowledge">知识库</a></td><td>向量 + 全文混合检索 RAG，全部本地索引</td></tr>
           <tr><td><a href="#/sandbox">代码沙箱</a></td><td>Pyodide 本地运行 Python，图表/文档产物自动交付</td></tr>
           <tr><td><a href="#/dock">右侧 Dock</a></td><td>文件树、Git 审查与真实 PTY 终端，绑定对话工作目录</td></tr>
-          <tr><td><a href="#/hooks">生命周期 Hooks</a></td><td>在对话的 8 个时点跑脚本或发 HTTP 请求</td></tr>
+          <tr><td><a href="#/plugins">插件与格式</a></td><td>Kivio Plugin v1 清单、目录结构、导入和跨格式兼容规则</td></tr>
+          <tr><td><a href="#/workflow-hooks">工作流 Hooks</a></td><td>注入上下文、改写工具参数、拒绝执行或请求审批</td></tr>
+          <tr><td><a href="#/hooks">通知 Hooks</a></td><td>在对话的 8 个时点异步跑脚本或发 HTTP 请求</td></tr>
           <tr><td><a href="#/translate">划词翻译</a></td><td>全局热键，流式翻译，提交即回填原应用</td></tr>
           <tr><td><a href="#/lens">Lens 取景</a></td><td>圈选屏幕任意区域或窗口，直接进入视觉对话</td></tr>
           <tr><td><a href="#/ocr">截图翻译与 OCR</a></td><td>Apple Vision / Windows OCR / 离线 RapidOCR 三引擎</td></tr>
@@ -559,11 +563,280 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <p>点卡片上的文件名会在右侧 Dock 里预览这个文件（<code>write</code> / <code>edit</code> 看 diff，<code>read</code> 看文件内容）。文件在工作目录之外时，用它所在的目录作为临时根目录打开。</p>
     </article>
 
+<article data-page="plugins" class="hidden">
+<div class="crumb">智能体</div>
+<h1>插件与格式</h1>
+<p>状态：已实现的个人范围插件格式，供内置 Kivio Agent 使用。</p>
+<h2 id="plugins-1">包入口与目录</h2>
+<p>插件是一个目录，必需入口为 <code>.kivio-plugin/plugin.json</code>。组件位于包根，不能放在 <code>.kivio-plugin</code> 内。</p>
+<pre><code class="language-text">my-plugin/
+  .kivio-plugin/plugin.json
+  skills/review/SKILL.md
+  commands/check.md
+  agents/reviewer.md
+  hooks/hooks.json
+  scripts/check.cjs
+  .mcp.json
+</code></pre>
+<p>最小清单：</p>
+<pre><code class="language-json">{"schemaVersion": 1, "name": "my-plugin", "version": "1.0.0"}
+</code></pre>
+<p>完整常用清单（声明的路径必须真实存在）：</p>
+<pre><code class="language-json">{
+  "schemaVersion": 1,
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "代码检查与评审",
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "agents": "./agents/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "metadata": { "author": "Your team", "license": "MIT" }
+}
+</code></pre>
+<h2 id="plugins-2">字段约定</h2>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>schemaVersion</td>
+<td>必填整数，当前为 1</td>
+<td>格式协议版本；未知版本拒绝导入</td>
+</tr>
+<tr>
+<td>name</td>
+<td>必填字符串</td>
+<td>1–64 个小写字母、数字；单个连字符分隔非空片段；用于命名空间</td>
+</tr>
+<tr>
+<td>version</td>
+<td>必填非空字符串</td>
+<td>插件发布版本，建议 <code>1.2.3</code>；当前不比较版本、不解析依赖范围</td>
+</tr>
+<tr>
+<td>description</td>
+<td>可选字符串</td>
+<td>插件管理页介绍</td>
+</tr>
+<tr>
+<td>skills / commands / agents / hooks / mcpServers</td>
+<td>可选字符串或字符串数组</td>
+<td>组件路径，见下面的发现规则</td>
+</tr>
+<tr>
+<td>metadata</td>
+<td>可选对象</td>
+<td>作者、许可证、仓库等附加信息；不影响运行，目前不专门展示</td>
+</tr>
+<tr>
+<td>$schema</td>
+<td>可选字符串</td>
+<td>编辑器 schema 引用；加载器不联网获取</td>
+</tr>
+</tbody></table>
+<p>未知顶层字段报错，以免拼写错误或尚未实现的能力静默失效。扩展性描述放进 <code>metadata</code>。机器可读定义在 <a href="./schemas/kivio-plugin.v1.schema.json">JSON Schema</a>，运行时还校验目标存在性和路径边界。</p>
+<p><code>schemaVersion</code> 表示格式版本，不能用来表达最低 Kivio 应用版本。v1 尚无应用版本约束、依赖声明或安装脚本协议。</p>
+<h2 id="plugins-3">组件发现</h2>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>省略字段时的默认位置</th>
+<th>文件格式</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>skills</td>
+<td>skills/</td>
+<td>每个技能目录中的 SKILL.md</td>
+</tr>
+<tr>
+<td>commands</td>
+<td>commands/</td>
+<td>Markdown + YAML frontmatter</td>
+</tr>
+<tr>
+<td>agents</td>
+<td>agents/</td>
+<td>Markdown + YAML frontmatter；当前不支持 TOML</td>
+</tr>
+<tr>
+<td>hooks</td>
+<td>hooks/hooks.json</td>
+<td>工作流事件 JSON</td>
+</tr>
+<tr>
+<td>mcpServers</td>
+<td>.mcp.json</td>
+<td>MCP server map JSON</td>
+</tr>
+</tbody></table>
+<p>默认路径不存在时跳过。显式路径替代该组件的默认位置；数组 <code>[]</code> 明确关闭该组件的默认发现。原生清单不接受内联 hooks/MCP 对象，配置放在独立文件，便于查看和复用。多个配置文件依次加载；不声明依赖执行顺序。</p>
+<p>路径相对包根，以 <code>./</code> 开头，使用 <code>/</code>，禁止 <code>..</code>、绝对路径、反斜线与 <code>:</code>。安装导入拒绝符号链接和越界目录链接。脚本及 references 等资源与组件一起保留在包内。</p>
+<p>技能与命令命名空间为 <code>my-plugin:review</code>、<code>/my-plugin:check</code>；子代理使用 <code>my-plugin:reviewer</code>。同一类组件应使用唯一名称。完整的 Skill/agent 元数据语义沿用 Kivio 现有解析器。</p>
+<h2 id="plugins-4">原生 Hook</h2>
+<p>沿用 <a href="#/workflow-hooks">工作流 Hook 协议</a>：SessionStart、UserPromptSubmit、SubagentStart、PreToolUse、PostToolUse。处理器类型为 command，使用 stdin JSON / stdout JSON，支持超时、取消、上下文、工具参数替换和审批结果。</p>
+<pre><code class="language-json">{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "write|edit",
+      "hooks": [{
+        "type": "command",
+        "command": "node",
+        "args": ["${PLUGIN_ROOT}/scripts/check.cjs"],
+        "timeout": 10
+      }]
+    }]
+  }
+}
+</code></pre>
+<p>原生包使用 Kivio 工具名（例如 <code>write</code>）和参数（例如 <code>tool_input.path</code>），保留带插件命名空间的 agent 名称，不做 Claude 工具名转换。<code>PLUGIN_ROOT</code> 是安装内容目录，<code>PLUGIN_DATA</code> 是该插件的可写数据目录。环境变量通过环境传入；直接启动模式的 args 会展开这些占位符。</p>
+<h2 id="plugins-5">原生 MCP</h2>
+<p>建议使用 <code>mcpServers</code> 包装对象：</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "local-helper": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/scripts/server.cjs"]
+    }
+  }
+}
+</code></pre>
+<p>支持 stdio 与 Streamable HTTP（<code>type: "http"</code>、<code>url</code>）。加载器也接受直接 server map 和 Codex 的 <code>mcp_servers</code> 包装。MCP 服务名应唯一，注册时带插件身份；停用/移除会撤销所属注册。环境变量缺失产生诊断，依赖程序不自动安装。</p>
+<h2 id="plugins-6">安装及兼容</h2>
+<p>扩展 → 插件 → 通用插件，导入本地包根或 HTTPS Git 仓库及子目录。导入后默认停用，启用后允许执行脚本，作用域为个人。卸载只删除托管副本（包含插件 data）及所属 MCP 注册。</p>
+<p>清单优先级为 <code>.kivio-plugin</code> → <code>.codex-plugin</code> → <code>.claude-plugin</code>，只加载最高优先级的一份，解析失败不回退。不修改来源仓库的清单。原生包与外部格式共享内部运行设施，但外部格式有独立兼容规则。</p>
+<p>当前没有原生 marketplace 索引、项目作用域、自动更新、安装器、平台托管 apps、LSP 或额外 Hook 事件；这些不属于 v1 格式承诺。</p>
+<p>可直接导入的示例：<code>tests/fixtures/plugins/kivio-example</code>。示例依赖 Node.js，其 Hook 只演示拒绝写入 <code>protected</code> 目录的操作，不修改文件，也不是文件系统安全边界。</p>
+
+</article>
+
+<article data-page="workflow-hooks" class="hidden">
+<div class="crumb">智能体</div>
+<h1>工作流 Hooks</h1>
+<h2 id="workflow-hooks-1">使用入口</h2>
+<ul>
+<li>扩展 → 插件 → <strong>通用插件</strong>：输入本地目录或 HTTPS Git 仓库，必要时填写插件子目录。导入不执行安装器，默认停用；检查组件后点启用。</li>
+<li>设置 → Hooks → <strong>工作流 Hooks</strong>：编辑并单独保存 JSON。<code>enabled: true</code> 表示允许执行脚本。旧生命周期 Hook 继续作为异步通知，保持原有配置和行为。</li>
+<li>当前作用域为个人，供内置 Kivio Agent 使用。Kivio Chat 不执行工作流脚本；外部 CLI 继续使用自己的原生插件配置。</li>
+</ul>
+<h2 id="workflow-hooks-2">插件包</h2>
+<p>原生格式见 <a href="#/plugins">Kivio Plugin v1</a>。入口优先级为 <code>.kivio-plugin/plugin.json</code> → <code>.codex-plugin/plugin.json</code> → <code>.claude-plugin/plugin.json</code>；只加载一份，解析失败不回退。包根保留原有目录结构，支持 Skills、Markdown commands、Markdown agents、stdio / Streamable HTTP MCP、command Hooks。</p>
+<pre><code class="language-text">example/
+  .claude-plugin/plugin.json
+  skills/review/SKILL.md
+  commands/check.md
+  agents/reviewer.md
+  hooks/hooks.json
+  scripts/context.cjs
+  .mcp.json
+</code></pre>
+<p>组件路径必须位于包根内。支持 manifest 自定义路径；Claude/Codex 兼容清单的 hooks/MCP 支持文件、内联对象和数组，Kivio 原生清单仅接受路径或路径数组。Claude skills 自定义路径追加到默认目录；commands/agents 自定义路径替代默认目录。Claude 默认 hooks/MCP 与显式配置一起读取，相同 JSON 不重复加载；Codex 和 Kivio 原生格式使用显式配置替代默认文件。</p>
+<p>插件内容复制到 <code>&lt;app_data&gt;/plugins/packages/&lt;uuid&gt;/content</code>，元数据保存在同级 <code>record.json</code>，插件可写数据放在 <code>data</code>。Git 来源保存实际 commit；不递归克隆 submodule，不复制 <code>.git</code>、<code>node_modules</code>，拒绝 symlink 和越界 junction，导入内容限制为 100 MiB。依赖由用户自行准备。</p>
+<p>Skill/agent 内部 ID 带包身份，显示名称带插件名称，命令形式如 <code>/example:check</code>。同名插件只能启用一个来源或版本；更换版本可以先导入新包，再停用旧包、启用新包。当前没有自动更新、marketplace 浏览或项目级开关。</p>
+<p>停用后新的 Hook、Skill、MCP 调用会检查插件状态；已经注入模型的历史上下文不会被追溯抹除，已在执行的工具遵循正常取消机制。移除仅删除 Kivio 托管副本及该包的 MCP 注册，不删除导入来源。更新或编辑配置在下一轮重新构造运行时；运行中的钩子按已取得的配置执行。</p>
+<h2 id="workflow-hooks-3">工作流 Hook 配置</h2>
+<pre><code class="language-json">{
+  "enabled": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^write$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["/absolute/path/check.cjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+</code></pre>
+<p>个人配置和 Kivio 原生插件使用 Kivio 工具名及参数。Claude/Codex 格式的兼容插件会对常见 Claude 工具名进行转换：Bash、Read、Write、Edit、Glob、Grep、Agent/Task；文件工具的 <code>file_path</code> 与 Kivio <code>path</code> 双向转换。其余工具参数仍须满足 Kivio 实际 schema，不能假设两个宿主的所有工具完全一致。</p>
+<p><code>args</code> 存在时直接启动可执行文件，避免 Shell 解析；不存在时使用 Kivio 默认 Shell（Windows 优先 Git Bash、否则 PowerShell；其他平台 sh）。可指定 <code>shell: "bash"</code>。脚本命令中的环境变量保持为变量引用，不把路径直接拼成 Shell 源码；PowerShell 路径转换为对应的环境变量语法。</p>
+<h2 id="workflow-hooks-4">事件与输入</h2>
+<p>共有字段：<code>schema_version: 1</code>、<code>hook_event_name</code>、<code>session_id</code>、<code>cwd</code>、<code>agent_type</code>。</p>
+<table>
+<thead>
+<tr>
+<th>事件</th>
+<th>边界</th>
+<th>特有输入</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>SessionStart</td>
+<td>进程内首次进入该会话；应用重启后恢复会话；自动摘要压缩完成</td>
+<td><code>source</code>: startup / resume / compact</td>
+</tr>
+<tr>
+<td>UserPromptSubmit</td>
+<td>主用户消息，以及运行中的 steering / follow-up；模型请求前</td>
+<td><code>prompt</code>：原始用户文本，插件命令展开不覆盖它</td>
+</tr>
+<tr>
+<td>SubagentStart</td>
+<td>子代理首次模型请求前</td>
+<td><code>agent_type</code></td>
+</tr>
+<tr>
+<td>PreToolUse</td>
+<td>工具 schema 校验与审批之前</td>
+<td><code>tool_name</code>、<code>tool_input</code>、<code>tool_use_id</code></td>
+</tr>
+<tr>
+<td>PostToolUse</td>
+<td>已执行工具返回后；审批拒绝等未执行路径不触发</td>
+<td>同上，加 <code>tool_response</code>（当前是 Kivio 返回的工具文本）</td>
+</tr>
+</tbody></table>
+<p>简单的 matcher 字符/<code>|</code>列表按完整名称匹配，其他字符串按正则处理；空字符串或 <code>*</code> 匹配全部。按插件身份排序，包内按声明顺序执行，同一事件中的处理器串行等待。多个并行工具仍可同时触发各自的 Hook，作者应使用 tool_use_id/session_id 管理并发。</p>
+<p>会话启动上下文缓存于进程内，会在后续轮次重新加入模型的 system 前缀；UserPromptSubmit 的上下文也保留到后续轮次。缓存上限 256 个会话/配置组合、每组合 64 KiB，配置改变使用新缓存身份。主会话和子代理上下文独立。<code>data</code> 是插件级持久目录，作者需要自己使用 session_id 隔离会话状态。</p>
+<h2 id="workflow-hooks-5">输出</h2>
+<p>stdin 收到一份 UTF-8 JSON，写完关闭。脚本 stdout 可返回：</p>
+<pre><code class="language-json">{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "ask",
+    "permissionDecisionReason": "请确认修改此文件",
+    "updatedInput": { "path": "safe.txt", "content": "text" },
+    "additionalContext": "用于此次执行的补充信息"
+  }
+}
+</code></pre>
+<ul>
+<li><code>additionalContext</code>：启动/用户消息/子代理事件注入相应模型上下文；工具事件放进工具反馈。仅 SessionStart / UserPromptSubmit 接受普通 stdout 文本作为上下文。</li>
+<li><code>PreToolUse.updatedInput</code>：完整替换参数，重新校验 schema，然后进行审批。多个 Hook 依次看到上一个修改后的输入。</li>
+<li><code>PreToolUse.permissionDecision</code>：deny 阻止执行；ask 请求宿主审批；allow 仍受原有权限检查约束。一个 Hook 拒绝后停止后续处理。</li>
+<li><code>UserPromptSubmit</code> 可用顶层 <code>decision: "block"</code> 和 <code>reason</code> 拒绝；启动事件/用户提示中的 <code>continue: false</code> 按拒绝处理。PostToolUse 的停止理由作为反馈，不会撤销已完成工具。</li>
+<li>退出码 2 可拒绝 PreToolUse / UserPromptSubmit，以 stderr 为理由；其他非零退出是执行错误。</li>
+<li>JSON 声明的 hookEventName 必须匹配实际事件。以 <code>{</code> / <code>[</code> 开头的无效 JSON 不会伪装成普通上下文。</li>
+</ul>
+<p>环境提供 <code>PLUGIN_ROOT</code>、<code>PLUGIN_DATA</code>、<code>CLAUDE_PLUGIN_ROOT</code>、<code>CLAUDE_PLUGIN_DATA</code>、<code>CLAUDE_PROJECT_DIR</code> 与 <code>KIVIO_HOOK_EVENT</code>。Skill/agent 正文中的插件根和数据目录占位符也会展开。不会读取或写入 Claude/Codex 的个人设置文件。</p>
+<p>每个处理器超时为 1–600 秒，默认 30 秒，覆盖 stdin 写入、输出读取和等待退出；单管道输出上限 64 KiB，输入上限 1 MiB。超时、输出过大、取消或 future 被丢弃都会清理进程树。PreToolUse 错误不会继续执行工具；PostToolUse 错误反馈给模型；启动/用户提示错误通过原有回复错误通道显示。</p>
+<h2 id="workflow-hooks-6">当前明确不支持</h2>
+<p>Stop/SubagentStop 等其余事件，prompt/agent/http 型工作流处理器，async workflow hooks，组件内嵌 hooks、context: fork，TOML 子代理、LSP、output styles、插件依赖自动安装、平台托管 apps 与专有 UI。未知事件或已知不支持的组件会生成诊断并阻止启用，避免把只加载一部分的包误报为可用。</p>
+<p>当前没有仿制 Claude transcript 文件、CLAUDE_ENV_FILE 持久环境或宿主状态栏。插件可以使用明确传入的 JSON 和插件数据目录；依赖这些宿主专属设施的脚本需要适配。包支持不等于对所有 Claude/Codex 工具 schema、权限模型和会话行为完全等价。</p>
+<h2 id="workflow-hooks-7">开发验证</h2>
+<p>Windows 使用 <code>scripts/win-cargo-test.ps1</code>；普通 <code>cargo test</code> 测试程序缺少 Common-Controls v6 清单时可能以 0xC0000139 退出。</p>
+<p>相关测试过滤：<code>workflow_hook</code>、<code>plugins::packages</code>、<code>chat::agent::execute::tests</code>、<code>chat::hooks::tests</code>。前端测试为 PluginPackages、WorkflowHooksPanel、HooksTab；变更还应通过 TypeScript 与 UI 构建。</p>
+
+</article>
+
     <article data-page="hooks" class="hidden">
       <div class="crumb">智能体</div>
-      <h1>生命周期 Hooks</h1>
+      <h1>通知 Hooks</h1>
       <p class="lead">在对话的 8 个时点自动跑一段脚本或发一个 HTTP 请求。</p>
-      <p>内置智能体运行时会在固定的生命周期事件上派发 Hook，用来做通知、埋点、外部联动这类事情。在设置的 <b>Hooks</b> 页添加、启停与编辑。</p>
+      <p>内置智能体运行时会在固定的生命周期事件上派发通知 Hook，用来做通知、埋点、外部联动。在设置的 <b>Hooks</b> 页添加、启停与编辑。需要读取脚本结果、注入上下文或拦截工具时，使用同页独立配置的 <a href="#/workflow-hooks">工作流 Hooks</a>；两者的事件名与执行语义不同。</p>
       <h2 id="hooks-events">事件</h2>
       <table>
         <thead><tr><th>事件</th><th>时机</th></tr></thead>
@@ -574,12 +847,12 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
           <tr><td><code>tool_execution_start</code> / <code>tool_execution_end</code></td><td>每次工具调用的开始与结束</td></tr>
         </tbody>
       </table>
-      <h2 id="hooks-types">两种 Hook</h2>
+      <h2 id="hooks-types">通知处理器</h2>
       <ul>
         <li><b>命令</b> —— 执行一段 Shell 脚本，事件载荷以 JSON 从 stdin 传入。</li>
         <li><b>HTTP</b> —— 向指定 URL 发请求，可自定义方法与请求头，载荷为 JSON 请求体。</li>
       </ul>
-      <p>两种都可设置超时。除 stdin / 请求体外，命令 Hook 还能读到这些环境变量（与 Claude Code、Codex 的事实标准对齐）：</p>
+      <p>两种都可设置超时。除 stdin / 请求体外，命令通知 Hook 还能读到这些 Kivio 环境变量：</p>
       <p><code>KIVIO_HOOK_EVENT</code> · <code>KIVIO_HOOK_NAME</code> · <code>KIVIO_CONVERSATION_ID</code> · <code>KIVIO_RUN_ID</code> · <code>KIVIO_WORKDIR</code> · <code>KIVIO_TOOL_NAME</code></p>
       <h2 id="hooks-semantics">行为约定</h2>
       <ul>

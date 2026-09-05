@@ -152,7 +152,7 @@ pub async fn execute_tool_call(
     // 宽容 coercion（对齐 pi validateToolArguments 的 Value.Convert + coerceWithJsonSchema）：
     // 校验前先按 schema 把「差一层类型」的参数掰正（"5"→5、"true"→true、5→"5"），
     // 弱模型的这类口误不值得烧掉一整轮。`arguments_raw` 保持模型原话（展示/落盘/回放）。
-    let call = {
+    let mut call = {
         let mut call = call;
         call.arguments =
             coerce_tool_arguments(&tool.input_schema, std::mem::take(&mut call.arguments));
@@ -180,6 +180,61 @@ pub async fn execute_tool_call(
     };
     host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
 
+    let mut hook_context = Vec::new();
+    let mut hook_approval_reason = None;
+    if let Some(package_id) = tool
+        .server_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("plugin-package-"))
+        .and_then(|rest| rest.get(..36))
+    {
+        if !crate::plugins::packages::owner_enabled(package_id) {
+            record.status = ToolCallStatus::Skipped;
+            record.completed_at = Some(chrono::Local::now().timestamp());
+            record.error = Some("Plugin has been disabled".into());
+            host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
+            return (record, "Plugin has been disabled".into(), Vec::new());
+        }
+    }
+    if let Some(runtime) = host.workflow_hooks().filter(|r| !r.hooks.is_empty()) {
+        let mut input = runtime.input("PreToolUse", ctx.conversation_id);
+        input["tool_name"] = serde_json::json!(tool.name);
+        input["tool_input"] = call.arguments.clone();
+        input["tool_use_id"] = serde_json::json!(call.id);
+        let outcome = crate::chat::workflow_hooks::run_for_host(
+            host,
+            "PreToolUse",
+            input,
+            ctx.conversation_id,
+            ctx.generation,
+        )
+        .await;
+        let failure = match outcome {
+            Ok(out) => {
+                if let Some(updated) = out.updated_input {
+                    call.arguments = updated;
+                    call.arguments_raw = call.arguments.to_string();
+                    record.arguments = call.arguments_raw.clone();
+                }
+                hook_context = out.context;
+                hook_approval_reason = out.ask;
+                out.denied
+            }
+            Err(err) => Some(err),
+        };
+        if let Some(reason) = failure {
+            record.status = if host.is_generation_active(ctx.conversation_id, ctx.generation) {
+                ToolCallStatus::Skipped
+            } else {
+                ToolCallStatus::Cancelled
+            };
+            record.completed_at = Some(chrono::Local::now().timestamp());
+            record.error = Some(reason.clone());
+            host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
+            return (record, format!("Workflow hook: {reason}"), Vec::new());
+        }
+    }
+    // Validate the effective arguments and run normal approval AFTER hook changes.
     if let Err(err) = validate_tool_arguments(tool, &call.arguments) {
         record.status = ToolCallStatus::Error;
         record.duration_ms = Some(0);
@@ -193,6 +248,23 @@ pub async fn execute_tool_call(
         );
     }
 
+    let hook_approved = if let Some(reason) = hook_approval_reason {
+        record.result_preview = Some(reason);
+        if !host.request_tool_approval(ctx, &record).await {
+            record.status = ToolCallStatus::Skipped;
+            record.completed_at = Some(chrono::Local::now().timestamp());
+            record.error = Some("Workflow hook approval was declined".into());
+            host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
+            return (
+                record,
+                "Workflow hook approval was declined".into(),
+                Vec::new(),
+            );
+        }
+        true
+    } else {
+        false
+    };
     if tool.source == "native" && ask_user::is_ask_user_tool_name(&tool.name) {
         let (record, content) =
             execute_ask_user_call(host, settings, ctx, record, call.arguments.clone()).await;
@@ -212,7 +284,7 @@ pub async fn execute_tool_call(
         record.error = Some(reason.to_string());
     };
 
-    if super::prepare::tool_requires_session_consent(tool) {
+    if !hook_approved && super::prepare::tool_requires_session_consent(tool) {
         let policy = settings.chat_tools.approval_policy.as_str();
         if policy == "always_confirm" {
             if !host.request_tool_approval(ctx, &record).await {
@@ -227,7 +299,7 @@ pub async fn execute_tool_call(
             let content = record.error.clone().unwrap_or_default();
             return (record, content, Vec::new());
         }
-    } else if tool_requires_approval(settings, tool) {
+    } else if !hook_approved && tool_requires_approval(settings, tool) {
         let approved = host.request_tool_approval(ctx, &record).await;
         if !approved {
             skip(&mut record, "Tool call was not approved");
@@ -264,7 +336,7 @@ pub async fn execute_tool_call(
     record.completed_at = Some(chrono::Local::now().timestamp());
     let max_tool_output_chars = settings.chat_tools.max_tool_output_chars;
     let mut follow_ups: Vec<Value> = Vec::new();
-    let tool_content = match result {
+    let mut tool_content = match result {
         Ok(Ok(mut output)) if !output.is_error => {
             assign_artifact_ids(&mut output.artifacts);
             if tool.name == "present_artifacts" {
@@ -308,6 +380,36 @@ pub async fn execute_tool_call(
             err
         }
     };
+    if let Some(runtime) = host.workflow_hooks().filter(|r| !r.hooks.is_empty()) {
+        let mut input = runtime.input("PostToolUse", ctx.conversation_id);
+        input["tool_name"] = serde_json::json!(tool.name);
+        input["tool_input"] = call.arguments.clone();
+        input["tool_response"] = serde_json::json!(tool_content);
+        input["tool_use_id"] = serde_json::json!(call.id);
+        match crate::chat::workflow_hooks::run_for_host(
+            host,
+            "PostToolUse",
+            input,
+            ctx.conversation_id,
+            ctx.generation,
+        )
+        .await
+        {
+            Ok(out) => {
+                hook_context.extend(out.context);
+                if let Some(reason) = out.denied {
+                    hook_context.push(reason);
+                }
+            }
+            Err(err) => hook_context.push(format!("PostToolUse hook failed: {err}")),
+        }
+    }
+    if !hook_context.is_empty() {
+        tool_content.push_str(&format!(
+            "\n\n[Workflow hook feedback]\n{}",
+            hook_context.join("\n\n")
+        ));
+    }
     host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
     (record, tool_content, follow_ups)
 }
@@ -1017,6 +1119,7 @@ mod tests {
 
     #[derive(Default)]
     struct ExecuteTestHost {
+        workflow: Option<crate::chat::workflow_hooks::Runtime>,
         approvals: AtomicUsize,
         consents: AtomicUsize,
         deny_consent: bool,
@@ -1024,6 +1127,9 @@ mod tests {
     }
 
     impl AgentHost for ExecuteTestHost {
+        fn workflow_hooks(&self) -> Option<&crate::chat::workflow_hooks::Runtime> {
+            self.workflow.as_ref()
+        }
         fn emit_stream_delta(
             &self,
             _conversation_id: &str,
@@ -1357,6 +1463,148 @@ mod tests {
         assert!(matches!(records[1].status, ToolCallStatus::Error));
     }
 
+    fn host_with_hook(dir: &std::path::Path, output: Value) -> ExecuteTestHost {
+        let file = dir.join("result.json");
+        std::fs::write(&file, output.to_string()).unwrap();
+        // Use the production shell choice; Git Bash and sh both support cat.
+        // On Windows PowerShell also aliases cat to Get-Content.
+        let command = format!("cat \"{}\"", file.to_string_lossy().replace('\\', "/"));
+        let hooks = crate::chat::workflow_hooks::parse(
+            &serde_json::json!({"PreToolUse":[{"hooks":[{"type":"command","command":command}]}]}),
+            "test",
+            dir,
+            dir,
+        )
+        .unwrap();
+        ExecuteTestHost {
+            workflow: Some(crate::chat::workflow_hooks::Runtime {
+                hooks,
+                cwd: dir.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_hook_denial_never_reaches_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_with_hook(
+            dir.path(),
+            serde_json::json!({"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"protected"}}),
+        );
+        let executor = ExecuteTestExecutor::default();
+        let (record, _, _) = execute_tool_call(
+            &host,
+            &executor,
+            &Settings::default(),
+            &test_execution_context(),
+            &sensitive_test_tool(),
+            test_pending_call(
+                "c",
+                "write",
+                serde_json::json!({"path":"file","content":"text"}),
+            ),
+            None,
+        )
+        .await;
+        assert!(matches!(record.status, ToolCallStatus::Skipped));
+        assert_eq!(record.error.as_deref(), Some("protected"));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(host.approvals.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_hook_changes_are_validated_before_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_with_hook(
+            dir.path(),
+            serde_json::json!({"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":{"content":"missing path"}}}),
+        );
+        let executor = ExecuteTestExecutor::default();
+        let (record, _, _) = execute_tool_call(
+            &host,
+            &executor,
+            &Settings::default(),
+            &test_execution_context(),
+            &sensitive_test_tool(),
+            test_pending_call(
+                "c",
+                "write",
+                serde_json::json!({"path":"file","content":"text"}),
+            ),
+            None,
+        )
+        .await;
+        assert!(matches!(record.status, ToolCallStatus::Error));
+        assert!(record.error.unwrap().contains("path"));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(host.approvals.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_hook_allow_cannot_bypass_host_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = host_with_hook(
+            dir.path(),
+            serde_json::json!({"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":{"path":"changed","content":"text"}}}),
+        );
+        host.deny_consent = true;
+        let executor = ExecuteTestExecutor::default();
+        let mut settings = Settings::default();
+        settings.chat_tools.approval_policy = "readonly_auto_sensitive_confirm".into();
+        let (record, _, _) = execute_tool_call(
+            &host,
+            &executor,
+            &settings,
+            &test_execution_context(),
+            &sensitive_test_tool(),
+            test_pending_call(
+                "c",
+                "write",
+                serde_json::json!({"path":"file","content":"text"}),
+            ),
+            None,
+        )
+        .await;
+        assert!(matches!(record.status, ToolCallStatus::Skipped));
+        assert_eq!(
+            serde_json::from_str::<Value>(&record.arguments).unwrap()["path"],
+            "changed"
+        );
+        assert_eq!(host.consents.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_hook_ask_requires_approval_even_under_auto_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_with_hook(
+            dir.path(),
+            serde_json::json!({"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"review"}}),
+        );
+        let executor = ExecuteTestExecutor::default();
+        let mut settings = Settings::default();
+        settings.chat_tools.approval_policy = "auto".into();
+        let (record, _, _) = execute_tool_call(
+            &host,
+            &executor,
+            &settings,
+            &test_execution_context(),
+            &sensitive_test_tool(),
+            test_pending_call(
+                "c",
+                "write",
+                serde_json::json!({"path":"file","content":"text"}),
+            ),
+            None,
+        )
+        .await;
+        assert!(matches!(record.status, ToolCallStatus::Success));
+        assert_eq!(host.approvals.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn schema_validation_rejects_additional_properties_without_declared_properties() {
         let mut tool = sensitive_test_tool();
@@ -1664,11 +1912,7 @@ mod tests {
             60_000
         );
         assert_eq!(
-            effective_tool_timeout_ms(
-                &settings,
-                &tool,
-                &serde_json::json!({ "wait_ms": 300_000 })
-            ),
+            effective_tool_timeout_ms(&settings, &tool, &serde_json::json!({ "wait_ms": 300_000 })),
             300_000
         );
     }

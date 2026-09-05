@@ -26,6 +26,8 @@
 
 ## 更新网站
 
+插件格式与工作流 Hook 两页以仓库 `docs/agents/kivio-plugin-format.md`、`docs/agents/plugin-hooks.md` 为内容来源。修改规范或 `docs/schemas/kivio-plugin.v1.schema.json` 后，在仓库安装开发依赖并运行 `node scripts/sync-plugin-docs.mjs`，同步官网文章及可下载 Schema。不要直接编辑这两篇生成的 HTML。
+
 改完本目录内容后，跑：
 
 ```bash

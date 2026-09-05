@@ -20,9 +20,13 @@ pub(super) struct ChatAgentHost<'a> {
     pub(super) suppress_partial_persist: bool,
     /// 用户配置的生命周期 Hooks。无启用 Hook 时为 `None`，loop 零开销。
     pub(super) hooks: Option<crate::chat::hooks::HookDispatcher>,
+    pub(super) workflow_hooks: crate::chat::workflow_hooks::Runtime,
 }
 
 impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
+    fn workflow_hooks(&self) -> Option<&crate::chat::workflow_hooks::Runtime> {
+        Some(&self.workflow_hooks)
+    }
     fn emit_stream_delta(
         &self,
         _conversation_id: &str,

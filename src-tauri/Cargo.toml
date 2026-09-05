@@ -160,6 +160,7 @@ windows = { version = "0.61.3", features = [
 custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
+tempfile = "3"
 # 测试用：test-util 提供 tokio 暂停时钟（start_paused），让重试退避 sleep 在单测中瞬时跳过。
 tokio = { version = "1", features = ["test-util", "macros", "rt", "rt-multi-thread", "time"] }
 # 测试用：构造 reqwest::Response（不走网络）以驱动 retry/failover 单测。与 reqwest 传递依赖同版本。

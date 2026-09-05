@@ -188,7 +188,37 @@ fn build_registry_inner(
     include_files: bool,
 ) -> Result<SkillRegistry, String> {
     let roots = scan_root_entries(app, extra_paths, project_cwd)?;
-    Ok(build_registry_from_roots(roots, include_files))
+    let mut registry = build_registry_from_roots(roots, include_files);
+    for plugin in crate::plugins::packages::active() {
+        let mut bundled = SkillRegistry::default();
+        for path in &plugin.skills {
+            if let Err(error) = collect_skill_files(path, 0, &mut bundled, "plugin", include_files)
+            {
+                registry.warnings.push(error);
+            }
+        }
+        for path in crate::plugins::packages::markdown_files(&plugin.commands) {
+            match load_plugin_command(&path) {
+                Ok(record) => bundled.records.push(record),
+                Err(error) => registry.warnings.push(error),
+            }
+        }
+        for mut record in bundled.records {
+            record.body = plugin.expand_body(&record.body);
+            let original = record.meta.id.clone();
+            record.meta.id = format!("pkg-{}-{original}", plugin.package.id);
+            record.meta.name = format!("{}:{}", plugin.package.name, record.meta.name);
+            record.meta.triggers = vec![format!("/{}:{original}", plugin.package.name)];
+            registry.records.push(record);
+        }
+        registry.warnings.extend(bundled.warnings);
+    }
+    Ok(registry)
+}
+
+fn load_plugin_command(path: &Path) -> Result<super::types::SkillRecord, String> {
+    let raw = crate::plugins::packages::component_markdown(path)?;
+    super::parse::parse_skill_record(path, &raw, "plugin", vec![], &mut vec![])
 }
 
 fn build_registry_from_roots(roots: Vec<SkillScanRoot>, include_files: bool) -> SkillRegistry {
@@ -281,8 +311,12 @@ fn load_skill_at(
     source: &str,
     include_files: bool,
 ) -> Result<super::types::SkillRecord, String> {
-    let raw = fs::read_to_string(skill_md_path)
-        .map_err(|err| format!("Read skill {} failed: {err}", skill_md_path.display()))?;
+    let raw = if source == "plugin" {
+        crate::plugins::packages::component_markdown(skill_md_path)?
+    } else {
+        fs::read_to_string(skill_md_path)
+            .map_err(|err| format!("Read skill {} failed: {err}", skill_md_path.display()))?
+    };
     let base_dir = skill_md_path
         .parent()
         .ok_or_else(|| "Skill path has no parent directory".to_string())?;

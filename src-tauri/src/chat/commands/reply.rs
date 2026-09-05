@@ -605,6 +605,20 @@ pub(super) async fn complete_assistant_reply_inner(
     );
 
     let chat_host = ChatAgentHost {
+        workflow_hooks: if chat_mode {
+            Default::default()
+        } else {
+            crate::plugins::packages::hook_runtime(
+                workbench_dir
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir),
+                "main".into(),
+                last_user_idx
+                    .and_then(|index| conversation.messages.get(index))
+                    .map(|m| m.content.clone()),
+            )
+        },
         app: app.clone(),
         state: state.inner(),
         run_id: run_id.clone(),

@@ -1577,7 +1577,23 @@ pub(crate) async fn maybe_compact_send_view(env: &LoopEnv<'_>, state: &mut RunSt
                     None,
                 );
             }
-            compacted
+            match crate::chat::workflow_hooks::compact_context(
+                env.host,
+                &config.conversation_id,
+                config.generation,
+            )
+            .await
+            {
+                Ok(context) => crate::chat::workflow_hooks::inject_context(
+                    &mut state.runtime_messages,
+                    &context,
+                ),
+                Err(error) => crate::chat::workflow_hooks::inject_context(
+                    &mut state.runtime_messages,
+                    &[format!("SessionStart compact hook failed: {error}")],
+                ),
+            }
+            state.runtime_messages.clone()
         }
         CompactOutcome::Cancelled => {
             // 用户主动取消进行中的 run：不计入 anti-thrashing（取消 ≠ 压缩无能为力），

@@ -59,13 +59,18 @@ impl SteeringMessage {
 /// 随 assistant 消息落盘（`model_messages_from_openai_messages` 认 `"user"` role），**下一轮回放
 /// 不丢**。工具结果之后紧跟一条 user 文本对三种线格式都安全：Anthropic / Gemini 适配器各有
 /// `merge_consecutive_*_roles` 把它合进同一个 turn，OpenAI 系天然接受连续 user。
-pub(crate) fn inject_steering_messages(env: &LoopEnv<'_>, state: &mut RunState, round: u32) {
+pub(crate) async fn inject_steering_messages(
+    env: &LoopEnv<'_>,
+    state: &mut RunState,
+    round: u32,
+) -> Result<(), String> {
     state
         .pending_steering
         .extend(env.host.take_steering_messages(&env.config.conversation_id));
     let Some(message) = state.pending_steering.pop_front() else {
-        return;
+        return Ok(());
     };
+    apply_prompt_hooks(env, state, &message.text).await?;
     append_injected_user_turn(
         env,
         state,
@@ -73,6 +78,7 @@ pub(crate) fn inject_steering_messages(env: &LoopEnv<'_>, state: &mut RunState, 
         &message,
         build_steer_record(&message, round),
     );
+    Ok(())
 }
 
 /// FinalAnswer 边界的外层检查（对齐 pi agent-loop 的外层 `while`：agent 本要停下时轮询
@@ -96,10 +102,15 @@ pub(crate) fn follow_up_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool
 }
 
 /// 终答已被吸收后注入**一条** follow-up（one-at-a-time，与 steer 同一纪律）。
-pub(crate) fn inject_follow_up_messages(env: &LoopEnv<'_>, state: &mut RunState, round: u32) {
+pub(crate) async fn inject_follow_up_messages(
+    env: &LoopEnv<'_>,
+    state: &mut RunState,
+    round: u32,
+) -> Result<(), String> {
     let Some(message) = state.pending_follow_up.pop_front() else {
-        return;
+        return Ok(());
     };
+    apply_prompt_hooks(env, state, &message.text).await?;
     append_injected_user_turn(
         env,
         state,
@@ -107,6 +118,38 @@ pub(crate) fn inject_follow_up_messages(env: &LoopEnv<'_>, state: &mut RunState,
         &message,
         build_follow_up_record(&message, round),
     );
+    Ok(())
+}
+
+async fn apply_prompt_hooks(
+    env: &LoopEnv<'_>,
+    state: &mut RunState,
+    prompt: &str,
+) -> Result<(), String> {
+    let Some(runtime) = env.host.workflow_hooks().filter(|r| !r.hooks.is_empty()) else {
+        return Ok(());
+    };
+    let mut input = runtime.input("UserPromptSubmit", &env.config.conversation_id);
+    input["prompt"] = serde_json::json!(prompt);
+    let out = crate::chat::workflow_hooks::run_for_host(
+        env.host,
+        "UserPromptSubmit",
+        input,
+        &env.config.conversation_id,
+        env.config.generation,
+    )
+    .await?;
+    if let Some(reason) = out.denied {
+        return Err(reason);
+    }
+    crate::chat::workflow_hooks::remember_context(
+        runtime,
+        &env.config.conversation_id,
+        &out.context,
+    )
+    .await;
+    crate::chat::workflow_hooks::inject_context(&mut state.runtime_messages, &out.context);
+    Ok(())
 }
 
 fn append_injected_user_turn(

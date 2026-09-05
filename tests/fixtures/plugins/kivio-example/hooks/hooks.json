@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "write|edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${PLUGIN_ROOT}/scripts/check.cjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

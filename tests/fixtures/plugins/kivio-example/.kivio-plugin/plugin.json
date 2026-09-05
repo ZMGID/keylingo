@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "name": "kivio-example",
+  "version": "1.0.0",
+  "description": "Kivio 原生插件示例：技能、命令、子代理和写入检查",
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "agents": "./agents/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": [],
+  "metadata": { "author": "Kivio", "license": "MIT" }
+}

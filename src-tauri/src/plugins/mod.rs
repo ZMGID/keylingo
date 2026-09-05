@@ -11,6 +11,7 @@ mod install;
 mod lifecycle;
 mod preview;
 mod state;
+pub mod packages;
 
 pub use catalog::{catalog_plugin, CatalogPlugin, PLUGIN_CATALOG};
 pub use install::{

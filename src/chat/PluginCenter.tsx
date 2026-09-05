@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { PluginPackages } from './PluginPackages'
 import {
   ExternalLink,
   FileSpreadsheet,
@@ -18,7 +19,7 @@ import {
 import { refreshSettings } from '../api/settingsCache'
 import { Button, IconButton } from '../components/Button'
 import { Toggle } from '../settings/components'
-import { useT } from '../settings/i18n'
+import { useLang, useT } from '../settings/i18n'
 
 interface PluginCenterProps {
   /** 让 Kivio AI 按规范文档安装：父级开新对话并发送 install brief */
@@ -232,6 +233,7 @@ function PluginCard({
 
 /** 插件中心：安装 / 启用开关控制 MCP / Skill。 */
 export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
+  const lang = useLang()
   const t = useT()
   const [tab, setTab] = useState<TabId>('plaza')
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
@@ -399,6 +401,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
 
   const body = (
     <>
+      <PluginPackages lang={lang} />
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <p className="max-w-2xl text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400">
           {t.chatPluginIntro}
