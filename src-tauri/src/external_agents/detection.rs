@@ -1063,7 +1063,7 @@ pub fn sandbox_options_for(agent_id: &str) -> Vec<RuntimeModelOption> {
 
 async fn probe_version(def: &RuntimeAgentDef, path: Option<&std::path::Path>) -> Option<String> {
     let bin = path?;
-    let output = crate::external_agents::spawn::agent_cli_command(def, bin)
+    let output = crate::external_agents::spawn::agent_probe_command(def, bin)
         .args(def.version_args)
         .no_console_window()
         .output()
@@ -1086,7 +1086,7 @@ async fn probe_auth(def: &RuntimeAgentDef, path: Option<&std::path::Path>) -> Op
     let bin = path?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        crate::external_agents::spawn::agent_cli_command(def, bin)
+        crate::external_agents::spawn::agent_probe_command(def, bin)
             .args(args)
             .no_console_window()
             .output(),
@@ -1221,7 +1221,7 @@ async fn probe_models(
     let timeout_secs = def.list_models_timeout_secs.unwrap_or(5);
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        crate::external_agents::spawn::agent_cli_command(def, bin)
+        crate::external_agents::spawn::agent_probe_command(def, bin)
             .args(args)
             .current_dir(cwd)
             .no_console_window()
@@ -1281,7 +1281,7 @@ async fn probe_codex_debug_models(
 ) -> Option<crate::external_agents::session::codex_app_server::CodexModelsProbe> {
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        crate::external_agents::spawn::agent_cli_command(def, bin)
+        crate::external_agents::spawn::agent_probe_command(def, bin)
             .args(["debug", "models"])
             .current_dir(cwd)
             .no_console_window()
@@ -1387,7 +1387,7 @@ async fn probe_opencode_models(
 ) -> Option<Vec<RuntimeModelOption>> {
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        crate::external_agents::spawn::agent_cli_command(def, bin)
+        crate::external_agents::spawn::agent_probe_command(def, bin)
             .arg("models")
             .current_dir(cwd)
             .no_console_window()

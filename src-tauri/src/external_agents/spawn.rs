@@ -169,6 +169,31 @@ pub fn agent_cli_command(def: &RuntimeAgentDef, program: impl AsRef<OsStr>) -> C
     command
 }
 
+/// Read-only discovery must not start Antigravity's detached self-updater.
+/// CREATE_NO_WINDOW only controls our direct child, not a CLI's detached helpers.
+/// Apply the official opt-out to probes only; normal CLI runs and updates retain
+/// their configured behavior. Other CLIs ignore this Antigravity-specific key.
+/// https://antigravity.google/docs/cli/troubleshooting/
+fn configure_probe_command(command: &mut Command) {
+    command
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+        .stdin(Stdio::null())
+        .no_console_window()
+        .kill_on_drop(true);
+}
+
+pub fn cli_probe_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = cli_command(program);
+    configure_probe_command(&mut command);
+    command
+}
+
+pub fn agent_probe_command(def: &RuntimeAgentDef, program: impl AsRef<OsStr>) -> Command {
+    let mut command = agent_cli_command(def, program);
+    configure_probe_command(&mut command);
+    command
+}
+
 /// 结束一个外部 CLI 子进程**及其整棵进程树**。
 ///
 /// 只 `start_kill()` 杀的是**直接子进程**：claude 会按用户的 `~/.claude.json` 把 MCP
@@ -454,7 +479,7 @@ pub fn clear_probe_cache() {
 /// 顺手把 stdout 接住给版本门控用（此前是 `Stdio::null()` 直接丢掉）。它拿不到时一律
 /// `None`，绝不影响第一项的判定 —— 未登录的 CLI 完全可能既非零退出又没有版本输出。
 async fn probe_executable(path: &Path, version_args: &[&str]) -> (bool, Option<String>) {
-    let mut command = cli_command(path);
+    let mut command = cli_probe_command(path);
     command
         .args(version_args)
         .stdin(Stdio::null())
@@ -634,6 +659,46 @@ pub fn parse_json_line(line: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discovery_reads_models_without_starting_updater_but_normal_cli_can_update() {
+        use crate::external_agents::defs::antigravity::ANTIGRAVITY_AGENT_DEF;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fake cli.cmd");
+        let updater_marker = dir.path().join("updater-started");
+        std::fs::write(
+            &bin,
+            "@echo off\r\nif not \"%AGY_CLI_DISABLE_AUTO_UPDATE%\"==\"true\" echo started>\"%~dp0updater-started\"\r\necho model-one\tModel One\r\n",
+        )
+        .unwrap();
+
+        // Exercise both executable discovery and the model/version/auth probe
+        // factory with a Windows batch shim, including a path containing spaces.
+        for mut command in [
+            cli_probe_command(&bin),
+            agent_probe_command(&ANTIGRAVITY_AGENT_DEF, &bin),
+        ] {
+            let output = command.arg("models").output().await.unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "model-one\tModel One"
+            );
+            assert!(!updater_marker.exists(), "discovery started an updater");
+        }
+
+        let output = cli_command(&bin)
+            .env_remove("AGY_CLI_DISABLE_AUTO_UPDATE")
+            .no_console_window()
+            .arg("models")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert!(updater_marker.exists(), "normal CLI update behavior changed");
+    }
 
     /// `cli_command` 必须剥掉父会话身份变量，否则 Kivio 从 Claude Code 内启动时，
     /// 这些变量会继承进来再泄漏给 CLI 子进程，子进程以为自己嵌套在别的会话里而拒绝启动。
