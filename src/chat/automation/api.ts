@@ -16,6 +16,9 @@ export const automationApi = {
   cancel: (id: string) => api.automationCancel(id),
   listRuns: (id: string) => api.automationRunsList(id),
   activeRun: (id: string) => api.automationActiveRun(id),
+  getRun: (id: string, runId: string) => api.automationRunGet(id, runId),
+  testNode: (id: string, nodeId: string, input: import('./types').NodeOutput) => api.automationTestNode(id, nodeId, input),
+  validate: (automation: Automation) => api.automationValidate(automation),
   exportToFile: (id: string, path: string) => api.automationExport(id, path),
   importFromFile: (path: string) => api.automationImport(path),
 }

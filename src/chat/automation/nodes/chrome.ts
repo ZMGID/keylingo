@@ -1,4 +1,6 @@
 import { createContext } from 'react'
+import type { ValidationIssue } from '../types'
+export const ValidationContext = createContext<ValidationIssue[]>([])
 import type { AgentSlot } from '../types'
 import type { NodeRunStatus } from '../types'
 

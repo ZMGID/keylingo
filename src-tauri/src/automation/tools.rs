@@ -544,6 +544,8 @@ mod tests {
             nodes: vec![
                 crate::automation::types::AutomationRunNode {
                     node_id: "t".into(),
+                    input: None,
+                    result: None,
                     node_type: "trigger.manual".into(),
                     status: "success".into(),
                     output: Some("agent".into()),
@@ -551,6 +553,8 @@ mod tests {
                 },
                 crate::automation::types::AutomationRunNode {
                     node_id: "n".into(),
+                    input: None,
+                    result: None,
                     node_type: "action.notify".into(),
                     status: "success".into(),
                     output: Some("done".into()),

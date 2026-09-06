@@ -12,6 +12,7 @@ import {
 } from '../agentModel'
 import { isAttachmentType, isIfType, isSwitchType, isTriggerType, branchHandles, type AutomationNodeType, type FlowNodeData, type NodeRunStatus } from '../types'
 import { CanvasChromeContext, NodeRunStatusContext } from './chrome'
+import { ValidationContext } from './chrome'
 
 export type AutomationRfNode = Node<FlowNodeData, AutomationNodeType>
 
@@ -171,6 +172,7 @@ export function FlowNode({ id, data, selected, type }: NodeProps<AutomationRfNod
   const entry = catalogEntry(type ?? '')
   const Icon = entry?.icon
   const status = useContext(NodeRunStatusContext)[id]
+  const issues = useContext(ValidationContext).filter((issue) => issue.nodeId === id)
   const chrome = useContext(CanvasChromeContext)
   const taken = chrome.occupied.get(id)
   const summary = nodeSummary(type ?? '', data, t)
@@ -211,6 +213,7 @@ export function FlowNode({ id, data, selected, type }: NodeProps<AutomationRfNod
         </ToolbarButton>
       </div>
       <div className="kv-automation-node-card">
+        {issues.length > 0 && <span className="kv-node-validation" role="img" aria-label={issues.map((issue) => issue.message).join('; ')} title={issues.map((issue) => issue.message).join('\n')}>!</span>}
         {attach ? (
           <Handle
             type="source"

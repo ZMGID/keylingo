@@ -2044,6 +2044,11 @@ export const api = {
   automationImport: (path: string) => invoke<Automation>('automation_import', { path }),
   automationRunsList: (id: string) => invoke<AutomationRunSummary[]>('automation_runs_list', { id }),
   automationActiveRun: (id: string) => invoke<AutomationRun | null>('automation_active_run', { id }),
+  automationRunGet: (id: string, runId: string) => invoke<AutomationRun>('automation_run_get', { id, runId }),
+  automationTestNode: (id: string, nodeId: string, input: import('../chat/automation/types').NodeOutput) =>
+    invoke<AutomationRunStarted>('automation_test_node', { id, nodeId, input }),
+  automationValidate: (automation: Automation) =>
+    invoke<import('../chat/automation/types').ValidationIssue[]>('automation_validate', { automation }),
   onAutomationRun: (listener: (payload: AutomationRunEvent) => void) =>
     on<AutomationRunEvent>('automation-run', listener),
   onAutomationChanged: (listener: (payload: AutomationChangedEvent) => void) =>

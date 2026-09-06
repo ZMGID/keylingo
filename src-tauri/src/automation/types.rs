@@ -189,6 +189,8 @@ impl RunOrigin {
 pub struct NodeOutput {
     pub text: String,
     pub json: serde_json::Value,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sources: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl NodeOutput {
@@ -197,6 +199,7 @@ impl NodeOutput {
         Self {
             json: serde_json::json!({ "text": text }),
             text,
+            sources: Default::default(),
         }
     }
 
@@ -204,6 +207,7 @@ impl NodeOutput {
         Self {
             text: text.into(),
             json,
+            sources: Default::default(),
         }
     }
 }
@@ -230,6 +234,10 @@ pub struct AutomationRunNode {
     pub node_id: String,
     pub node_type: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<NodeOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<NodeOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

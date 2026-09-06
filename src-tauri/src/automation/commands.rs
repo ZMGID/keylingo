@@ -68,6 +68,16 @@ pub fn automation_run(
 }
 
 #[tauri::command]
+pub fn automation_test_node(app: AppHandle, id: String, node_id: String, input: super::types::NodeOutput) -> Result<AutomationRunStarted, String> {
+    runner::test_node(app, id, node_id, input)
+}
+
+#[tauri::command]
+pub fn automation_validate(automation: Automation) -> Vec<super::types::ValidationIssue> {
+    super::validate::validate(&automation)
+}
+
+#[tauri::command]
 pub fn automation_cancel(app: AppHandle, id: String) -> Result<(), String> {
     runner::cancel(&app, &id)
 }

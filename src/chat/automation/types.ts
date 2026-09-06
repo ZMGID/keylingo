@@ -207,9 +207,23 @@ export interface AutomationRun extends AutomationRunSummary {
     nodeId: string
     nodeType: string
     status: string
+    input?: NodeOutput | null
+    result?: NodeOutput | null
     output?: string | null
     error?: string | null
   }>
+}
+
+export interface NodeOutput {
+  text: string
+  json: unknown
+  sources?: Record<string, { text: string; json: unknown }>
+}
+
+export interface ValidationIssue {
+  nodeId?: string | null
+  severity: string
+  message: string
 }
 
 export function isTriggerType(type: string): type is AutomationNodeType {

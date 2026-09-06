@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AutomationRun, AutomationRunEvent } from './types'
 import { useAutomationRunState } from './useAutomationRunState'
 
-const mocks = vi.hoisted(() => ({ subscribe: vi.fn(), active: vi.fn(), list: vi.fn(), unlisten: vi.fn() }))
+const mocks = vi.hoisted(() => ({ subscribe: vi.fn(), active: vi.fn(), list: vi.fn(), get: vi.fn(), unlisten: vi.fn() }))
 vi.mock('../../api/tauri', () => ({ isTauriRuntime: () => true, api: { onAutomationRun: mocks.subscribe } }))
-vi.mock('./api', () => ({ automationApi: { activeRun: mocks.active, listRuns: mocks.list } }))
+vi.mock('./api', () => ({ automationApi: { activeRun: mocks.active, listRuns: mocks.list, getRun: mocks.get } }))
 
 const snapshot: AutomationRun = {
   id: 'run', automationId: 'auto', origin: 'schedule', status: 'running', startedAt: '2026-09-06T00:00:00Z',
@@ -21,9 +21,30 @@ beforeEach(() => {
   mocks.subscribe.mockImplementation(async (fn: typeof listener) => { listener = fn; return mocks.unlisten })
   mocks.list.mockResolvedValue([])
   mocks.active.mockResolvedValue(null)
+  mocks.get.mockResolvedValue(snapshot)
 })
 
 describe('useAutomationRunState', () => {
+  it('loads the latest completed run for input/output inspection after reopening', async () => {
+    const completed = { ...snapshot, status: 'success', nodes: [{ nodeId: 'agent', nodeType: 'action.agent', status: 'success', result: { text: 'done', json: { ok: true } } }] }
+    mocks.list.mockResolvedValue([completed])
+    mocks.get.mockResolvedValue(completed)
+    const { result } = renderHook(() => useAutomationRunState('auto'))
+    await waitFor(() => expect(result.current.runData).toEqual(completed))
+    expect(result.current.running).toBe(false)
+  })
+
+  it('does not display late data from the previous run after a new run starts', async () => {
+    let resolve!: (value: AutomationRun) => void
+    mocks.get.mockImplementation(() => new Promise<AutomationRun>((done) => { resolve = done }))
+    const { result } = renderHook(() => useAutomationRunState('auto'))
+    await waitFor(() => expect(mocks.active).toHaveBeenCalled())
+    act(() => listener({ automationId: 'auto', runId: 'old', kind: 'node_finished', nodeId: 'agent', status: 'success' }))
+    act(() => listener({ automationId: 'auto', runId: 'new', kind: 'run_started' }))
+    await act(async () => { resolve(snapshot) })
+    expect(result.current.runData).toBeNull()
+    expect(result.current.running).toBe(true)
+  })
   it('restores an existing background run and its node progress on mount', async () => {
     mocks.active.mockResolvedValue(snapshot)
     const { result, unmount } = renderHook(() => useAutomationRunState('auto'))

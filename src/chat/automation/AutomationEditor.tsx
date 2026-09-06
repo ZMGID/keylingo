@@ -26,7 +26,11 @@ import { ArrowLeft, Download, Play, Plus, Square } from 'lucide-react'
 import { isTauriRuntime } from '../../api/tauri'
 import { Button } from '../../components/Button'
 import { Toggle } from '../../settings/components'
-import { useT } from '../../settings/i18n'
+import { useT, useLang } from '../../settings/i18n'
+import { WorkflowWorkbench } from './WorkflowWorkbench'
+import { workflowIssues } from './workflowData'
+import { ValidationContext } from './nodes/chrome'
+import type { ValidationIssue, NodeOutput } from './types'
 import { AddNodePicker } from './AddNodePicker'
 import { automationApi } from './api'
 import { NodeInspector } from './NodeInspector'
@@ -179,7 +183,23 @@ function EditorInner({
     automation.nodes[0]?.id ?? null,
   )
   const [picker, setPicker] = useState<'trigger' | 'action' | null>(null)
-  const { running, setRunning, runError, setRunError, nodeStatus, nodeOutput, runs, liveStartedAt } = useAutomationRunState(automation.id)
+  const { running, setRunning, runError, setRunError, nodeStatus, nodeOutput, runs, liveStartedAt, runData } = useAutomationRunState(automation.id)
+  const english = useLang() === 'en'
+  const localIssues = useMemo(() => workflowIssues(automation, english), [automation, english])
+  const [serverIssues, setServerIssues] = useState<ValidationIssue[]>([])
+  useEffect(() => {
+    let disposed = false
+    setServerIssues([])
+    if (!isTauriRuntime()) return
+    const timer = window.setTimeout(() => {
+      void automationApi.validate(automation).then((issues) => {
+        if (!disposed) setServerIssues(issues.filter((issue) => !automation.nodes.find((node) => node.id === issue.nodeId)?.data.disabled))
+      }).catch(() => {})
+    }, 300)
+    return () => { disposed = true; window.clearTimeout(timer) }
+  }, [automation])
+  const issues = useMemo(() => [...localIssues, ...serverIssues.filter((issue) =>
+    !localIssues.some((local) => local.nodeId === issue.nodeId && local.severity === issue.severity))], [localIssues, serverIssues])
   const viewportRef = useRef<Viewport>(automation.viewport)
   const pendingAddRef = useRef<AddIntent | null>(null)
   const nodesRef = useRef(nodes)
@@ -407,6 +427,12 @@ function EditorInner({
     if (!isTauriRuntime()) return
     setRunError('')
     try {
+      const problems = [...workflowIssues(automation, english), ...await automationApi.validate(automation)]
+        .filter((issue) => issue.severity === 'error' && !automation.nodes.find((node) => node.id === issue.nodeId)?.data.disabled)
+      if (problems.length) {
+        if (problems[0].nodeId) setSelectedId(problems[0].nodeId)
+        throw new Error(problems[0].message)
+      }
       await onFlushSave()
       setRunning(true)
       await automationApi.run(automation.id, untilNodeId)
@@ -414,7 +440,19 @@ function EditorInner({
       setRunning(false)
       setRunError(err instanceof Error ? err.message : String(err))
     }
-  }, [automation.id, onFlushSave, setRunError, setRunning])
+  }, [automation, english, onFlushSave, setRunError, setRunning])
+
+  const testSelected = async (input: NodeOutput) => {
+    if (!isTauriRuntime()) throw new Error(english ? 'Node tests require the desktop app' : '单节点测试需要在桌面应用中执行')
+    if (!selected) return
+    const problems = issues.filter((issue) => issue.nodeId === selected.id && issue.severity === 'error')
+    if (problems.length) throw new Error(problems[0].message)
+    await onFlushSave()
+    setRunError('')
+    setRunning(true)
+    try { await automationApi.testNode(automation.id, selected.id, input) }
+    catch (err) { setRunning(false); throw err }
+  }
 
   const cancelRun = useCallback(async () => {
     try {
@@ -565,6 +603,7 @@ function EditorInner({
       <div className="kv-automation-editor-body">
         <div className="kv-automation-canvas">
           <CanvasChromeContext.Provider value={canvasChrome}>
+          <ValidationContext.Provider value={issues}>
           <NodeRunStatusContext.Provider value={nodeStatus}>
             <ReactFlow
               nodes={nodes}
@@ -635,6 +674,7 @@ function EditorInner({
               <Controls showInteractive={false} />
             </ReactFlow>
           </NodeRunStatusContext.Provider>
+          </ValidationContext.Provider>
           </CanvasChromeContext.Provider>
           <div className="kv-automation-capsule-wrap">
             <div className="kv-automation-capsule">
@@ -693,6 +733,12 @@ function EditorInner({
           />
         </div>
         <div className="kv-automation-side">
+          {issues.length > 0 && <details className="kv-workbench-checks">
+            <summary>{english ? 'Configuration checks' : '配置检查'} · {issues.length}</summary>
+            {issues.map((issue, index) => <button type="button" key={index} onClick={() => { if (issue.nodeId) { setSelectedId(issue.nodeId); setPicker(null) } }}>
+              {automation.nodes.find((node) => node.id === issue.nodeId)?.data.label}: {issue.message}
+            </button>)}
+          </details>}
           {picker || !selected ? (
             <AddNodePicker
               kind={picker ?? (hasTrigger ? 'action' : 'trigger')}
@@ -704,6 +750,8 @@ function EditorInner({
               } : undefined}
             />
           ) : (
+            <WorkflowWorkbench key={selected.id} graph={automation} node={selected} run={runData} running={running}
+              issues={issues.filter((issue) => issue.nodeId === selected.id)} onChange={patchSelected} onTest={testSelected}>
             <NodeInspector
               node={selected}
               onChange={(next) => {
@@ -714,6 +762,7 @@ function EditorInner({
               running={running}
               lastOutput={nodeOutput[selected.id]}
             />
+            </WorkflowWorkbench>
           )}
         </div>
       </div>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, isTauriRuntime } from '../../api/tauri'
 import { automationApi } from './api'
-import type { AutomationRunSummary, NodeRunStatus } from './types'
+import type { AutomationRun, AutomationRunSummary, NodeRunStatus } from './types'
 
 function nodeStatus(status: string): NodeRunStatus {
   if (status === 'running' || status === 'error') return status
@@ -15,6 +15,7 @@ export function useAutomationRunState(automationId: string) {
   const [statuses, setStatuses] = useState<Record<string, NodeRunStatus>>({})
   const [nodeOutput, setNodeOutput] = useState<Record<string, string>>({})
   const [runs, setRuns] = useState<AutomationRunSummary[]>([])
+  const [runData, setRunData] = useState<AutomationRun | null>(null)
   const [liveStartedAt, setLiveStartedAt] = useState<string | null>(null)
   const startedAtRef = useRef<string | null>(null)
   const historyRequestRef = useRef(0)
@@ -36,11 +37,21 @@ export function useAutomationRunState(automationId: string) {
     if (!isTauriRuntime()) return
     let disposed = false
     let revision = 0
+    let dataRequest = 0
+    const readData = async (runId: string) => {
+      const request = ++dataRequest
+      try {
+        const run = await automationApi.getRun(automationId, runId)
+        if (!disposed && request === dataRequest) setRunData(run)
+      } catch { /* A later event retries; data never changes running controls. */ }
+    }
     let unlisten: (() => void) | undefined
     void api.onAutomationRun((event) => {
       if (disposed || event.automationId !== automationId) return
       revision += 1
       if (event.kind === 'run_started') {
+        dataRequest += 1
+        setRunData(null)
         const startedAt = new Date().toISOString()
         startedAtRef.current = startedAt
         setLiveStartedAt(startedAt)
@@ -49,6 +60,7 @@ export function useAutomationRunState(automationId: string) {
         setStatuses({})
         setNodeOutput({})
       }
+      if (event.kind === 'node_finished' || event.kind === 'run_finished') void readData(event.runId)
       if (event.kind === 'node_started' && event.nodeId) {
         setRunning(true)
         setStatuses((current) => ({ ...current, [event.nodeId!]: 'running' }))
@@ -84,7 +96,13 @@ export function useAutomationRunState(automationId: string) {
         const run = await automationApi.activeRun(automationId)
         if (disposed) return
         if (before !== revision) continue
-        if (!run) return
+        if (!run) {
+          const beforeHistory = revision
+          const history = await automationApi.listRuns(automationId)
+          if (!disposed && beforeHistory === revision && history[0]) await readData(history[0].id)
+          return
+        }
+        setRunData(run)
         const active = run.status === 'running'
         setRunning(active)
         startedAtRef.current = active ? run.startedAt : null
@@ -101,5 +119,5 @@ export function useAutomationRunState(automationId: string) {
     return () => { disposed = true; unlisten?.() }
   }, [automationId, loadRuns])
 
-  return { running, setRunning, runError, setRunError, nodeStatus: statuses, nodeOutput, runs, liveStartedAt }
+  return { running, setRunning, runError, setRunError, nodeStatus: statuses, nodeOutput, runs, liveStartedAt, runData }
 }
