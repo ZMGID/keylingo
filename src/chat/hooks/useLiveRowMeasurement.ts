@@ -1,15 +1,16 @@
 import { useCallback, useRef } from 'react'
-import type { Virtualizer } from '@tanstack/react-virtual'
+import type { VirtualItem, Virtualizer } from '@tanstack/react-virtual'
 import {
   layoutScopedVirtualKey,
   measureChatVirtualRow,
   measureSettledChatRow,
 } from '../messageListVirtualization'
 
-/** One temporary estimate follows the stable row key from live content to history. */
+/** Keep reused rows measured across live→history and width-layout handoffs. */
 export function useLiveRowMeasurement(layoutKey: string, liveRowKey: string | null) {
   const pending = useRef<{ key: string; height: number } | null>(null)
   const observer = useRef<ResizeObserver | null>(null)
+  const rowLayouts = useRef(new WeakMap<HTMLDivElement, { layout: string; key: VirtualItem['key'] }>())
   const liveKey = liveRowKey === null ? null : layoutScopedVirtualKey(layoutKey, liveRowKey)
 
   const liveRowRef = useCallback((element: HTMLDivElement | null) => {
@@ -36,19 +37,33 @@ export function useLiveRowMeasurement(layoutKey: string, liveRowKey: string | nu
       : undefined
   }, [layoutKey])
 
+  // Reattach the ref on a width change without remounting the message subtree.
   const measureRow = useCallback((
     element: HTMLDivElement | null,
     instance: Virtualizer<HTMLDivElement, HTMLDivElement>,
   ) => {
-    if (element && pending.current?.key === instance.options.getItemKey(instance.indexFromElement(element))) {
-      pending.current = null
-      // The seed may predate collapsed reasoning or the final footer. Replace
-      // it before paint even when TanStack would defer measurement during scroll.
+    if (!element) {
+      instance.measureElement(null)
+      return
+    }
+    const key = instance.options.getItemKey(instance.indexFromElement(element))
+    const previous = rowLayouts.current.get(element)
+    const layoutChanged = previous !== undefined && previous.layout !== layoutKey
+    rowLayouts.current.set(element, { layout: layoutKey, key })
+    if (previous && previous.key !== key && instance.elementsCache.get(previous.key) === element) {
+      instance.elementsCache.delete(previous.key)
+    }
+    const settling = pending.current?.key === key
+    if (settling) pending.current = null
+    if (settling || layoutChanged) {
+      // React keeps the DOM across both live→history and width changes. The
+      // new layout key has different estimates, but unchanged line breaks mean
+      // RO may never fire. Correct the height before paint, even during scroll.
       measureSettledChatRow(element, instance)
     } else {
       instance.measureElement(element)
     }
-  }, [])
+  }, [layoutKey])
 
   return { liveRowRef, getLiveRowSize, measureRow }
 }

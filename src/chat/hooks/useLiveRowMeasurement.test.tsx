@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, useCallback } from 'react'
 import { act, render, renderHook } from '@testing-library/react'
 import { Virtualizer } from '@tanstack/react-virtual'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,7 +18,10 @@ beforeEach(() => {
   })
 })
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 function virtualizer(key: string, estimateSize: () => number) {
   const instance = new Virtualizer<HTMLDivElement, HTMLDivElement>({
@@ -95,6 +98,37 @@ describe('useLiveRowMeasurement', () => {
     act(() => result.current.liveRowRef(element))
     rerender({ layout: nextLayout })
     expect(result.current.getLiveRowSize('live-turn-1')).toBeUndefined()
+  })
+
+  it.each([200, 600])('remeasures reused history on a width change with a stale %ipx estimate', (estimate) => {
+    // The browser does not deliver another RO entry when width changes but the
+    // text still wraps into the same number of lines. Exercise the actual React
+    // ref lifecycle with scrolling active, when TanStack defers normal ref reads.
+    const instance = virtualizer(layoutScopedVirtualKey(layoutKey, 'answer'), () => estimate)
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(300)
+    function HistoryRow({ layout }: { layout: string }) {
+      const { measureRow } = useLiveRowMeasurement(layout, null)
+      instance.setOptions({
+        ...instance.options,
+        getItemKey: () => layoutScopedVirtualKey(layout, 'answer'),
+      })
+      instance.getTotalSize()
+      const ref = useCallback((element: HTMLDivElement | null) => measureRow(element, instance), [measureRow])
+      return <div data-index="0" ref={ref}>An answer with unchanged line breaks</div>
+    }
+    const view = render(<HistoryRow layout={layoutKey} />)
+    const original = view.container.firstElementChild
+    // Initial RO delivered the real height in the original layout.
+    instance.resizeItem(0, 300)
+    expect(instance.getTotalSize()).toBe(300)
+
+    for (const layout of ['conversation:816', 'conversation:640', layoutKey]) {
+      view.rerender(<HistoryRow layout={layout} />)
+      expect(view.container.firstElementChild).toBe(original)
+      expect(instance.getTotalSize()).toBe(300)
+      expect([...instance.elementsCache.keys()]).toEqual([layoutScopedVirtualKey(layout, 'answer')])
+    }
+    view.unmount()
   })
 
   it('leaves unrelated history on the normal deferred measurement path', () => {
