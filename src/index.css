@@ -3936,18 +3936,6 @@ button.chat-composer-status-item:hover {
   scrollbar-gutter: stable;
   min-width: 0;
 }
-.kv-scroll::-webkit-scrollbar { width: 8px; }
-.kv-scroll::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 4px;
-  border: 2px solid var(--bg);
-  background-clip: padding-box;
-}
-.kv-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--text-faint);
-  background-clip: padding-box;
-  border: 2px solid var(--bg);
-}
 
 .kv-content--wide {
   --settings-content-max: 1200px;

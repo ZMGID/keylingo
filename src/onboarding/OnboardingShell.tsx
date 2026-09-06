@@ -257,7 +257,7 @@ export function OnboardingShell({ onComplete, onSkip, onSettingsChange }: Onboar
           </Button>
         </div>
 
-        <div className="onboarding-body kv-scroll" data-tauri-drag-region="false">
+        <div className="onboarding-body kv-scroll custom-scrollbar" data-tauri-drag-region="false">
           {stepId === 'welcome' ? <WelcomeStep t={t} /> : null}
           {stepId === 'provider' ? (
             <ProviderStep

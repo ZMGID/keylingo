@@ -1830,7 +1830,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const categoryNav =
     variant === 'embedded' ? (
       <>
-        <nav className="settings-embedded-nav-list">
+        <nav className="settings-embedded-nav-list custom-scrollbar">
           {navItems.map((item) => {
             const Icon = item.icon
             return (
@@ -1904,7 +1904,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
           <div
             key={activeTab}
-            className={`kv-scroll settings-section-enter ${variant === 'embedded' ? 'settings-embedded-scroll' : ''}${activeTab === 'sessions' ? ' kv-scroll--fill' : ''}`}
+            className={`kv-scroll custom-scrollbar settings-section-enter ${variant === 'embedded' ? 'settings-embedded-scroll' : ''}${activeTab === 'sessions' ? ' kv-scroll--fill' : ''}`}
           >
             {/* ===== 基础设置标签页 ===== */}
             {activeTab === 'general' && (
