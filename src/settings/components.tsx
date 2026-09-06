@@ -155,7 +155,7 @@ function SelectMenuPortal({
 /**
  * 下拉选择 — 自绘菜单，避免 macOS 原生 select 的系统高亮/勾选反馈和受控状态不同步。
  */
-export function Select({ value, onChange, options, className = '', disabled: disabledProp = false, title }: {
+export function Select({ value, onChange, options, className = '', disabled: disabledProp = false, title, ariaLabel }: {
   value: string
   onChange: (v: string) => void
   options: SelectOption[]
@@ -163,6 +163,8 @@ export function Select({ value, onChange, options, className = '', disabled: dis
   disabled?: boolean
   /** 覆盖触发按钮的原生 tooltip（默认显示当前选中项）。 */
   title?: string
+  /** 无可关联原生 label 时，为触发按钮提供可访问名称。 */
+  ariaLabel?: string
 }) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -190,6 +192,7 @@ export function Select({ value, onChange, options, className = '', disabled: dis
         className="kv-select kv-select-button relative h-[30px] w-full min-w-0 max-w-none text-left disabled:cursor-not-allowed disabled:opacity-50"
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-label={ariaLabel}
         title={title ?? displayTitle}
         data-tauri-drag-region="false"
       >
@@ -673,4 +676,3 @@ export function HotkeyInput({
     </div>
   )
 }
-

@@ -28,7 +28,7 @@ import { Button } from '../../components/Button'
 import { Toggle } from '../../settings/components'
 import { useT, useLang } from '../../settings/i18n'
 import { WorkflowWorkbench } from './WorkflowWorkbench'
-import { workflowIssues } from './workflowData'
+import { localizeValidationIssue, workflowIssues } from './workflowData'
 import { ValidationContext } from './nodes/chrome'
 import type { ValidationIssue, NodeOutput } from './types'
 import { AddNodePicker } from './AddNodePicker'
@@ -186,20 +186,36 @@ function EditorInner({
   const { running, setRunning, runError, setRunError, nodeStatus, nodeOutput, runs, liveStartedAt, runData } = useAutomationRunState(automation.id)
   const english = useLang() === 'en'
   const localIssues = useMemo(() => workflowIssues(automation, english), [automation, english])
-  const [serverIssues, setServerIssues] = useState<ValidationIssue[]>([])
+  const [serverValidation, setServerValidation] = useState<{
+    automationId: string
+    issues: ValidationIssue[]
+  }>({ automationId: automation.id, issues: [] })
   useEffect(() => {
     let disposed = false
-    setServerIssues([])
     if (!isTauriRuntime()) return
     const timer = window.setTimeout(() => {
       void automationApi.validate(automation).then((issues) => {
-        if (!disposed) setServerIssues(issues.filter((issue) => !automation.nodes.find((node) => node.id === issue.nodeId)?.data.disabled))
+        if (!disposed) {
+          setServerValidation({
+            automationId: automation.id,
+            issues: issues
+              .filter((issue) => !automation.nodes.find((node) => node.id === issue.nodeId)?.data.disabled)
+              .map((issue) => localizeValidationIssue(issue, english)),
+          })
+        }
       }).catch(() => {})
     }, 300)
     return () => { disposed = true; window.clearTimeout(timer) }
-  }, [automation])
-  const issues = useMemo(() => [...localIssues, ...serverIssues.filter((issue) =>
-    !localIssues.some((local) => local.nodeId === issue.nodeId && local.severity === issue.severity))], [localIssues, serverIssues])
+  }, [automation, english])
+  const issues = useMemo(() => {
+    const serverIssues = serverValidation.automationId === automation.id
+      ? serverValidation.issues
+      : []
+    return [...localIssues, ...serverIssues.filter((issue) =>
+      !localIssues.some((local) => local.nodeId === issue.nodeId
+        && local.severity === issue.severity
+        && local.message === issue.message))]
+  }, [automation.id, localIssues, serverValidation])
   const viewportRef = useRef<Viewport>(automation.viewport)
   const pendingAddRef = useRef<AddIntent | null>(null)
   const nodesRef = useRef(nodes)
@@ -735,7 +751,7 @@ function EditorInner({
         <div className="kv-automation-side">
           {issues.length > 0 && <details className="kv-workbench-checks">
             <summary>{english ? 'Configuration checks' : '配置检查'} · {issues.length}</summary>
-            {issues.map((issue, index) => <button type="button" key={index} onClick={() => { if (issue.nodeId) { setSelectedId(issue.nodeId); setPicker(null) } }}>
+            {issues.map((issue, index) => <button type="button" className="kv-menu-item" key={index} onClick={() => { if (issue.nodeId) { setSelectedId(issue.nodeId); setPicker(null) } }}>
               {automation.nodes.find((node) => node.id === issue.nodeId)?.data.label}: {issue.message}
             </button>)}
           </details>}

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useLang } from '../../settings/i18n'
 import { Button } from '../../components/Button'
+import { Select } from '../../settings/components'
 import { dataFields, insertReference, templateFields, upstreamNodes } from './workflowData'
 import { isAttachmentType, isStepType, type Automation, type AutomationRun, type FlowNode, type NodeOutput, type ValidationIssue } from './types'
 
@@ -48,24 +49,26 @@ export function WorkflowWorkbench({ graph, node, run, running, issues, onChange,
     finally { setPending(false) }
   }
   return <div className="kv-workbench">
-    <div className="kv-workbench-tabs" role="tablist" aria-label={say('节点工作台', 'Node workbench')}>
+    <div className="kv-seg kv-workbench-tabs" role="tablist" aria-label={say('节点工作台', 'Node workbench')}>
       {(['params', 'input', 'output'] as const).map((value, index) => <button key={value} type="button" role="tab"
-        aria-selected={tab === value} onClick={() => setTab(value)}>
+        className={tab === value ? 'active' : ''} aria-selected={tab === value} onClick={() => setTab(value)}>
         {[say('参数', 'Parameters'), say('输入 / 测试', 'Input / Test'), say('输出', 'Output')][index]}
       </button>)}
     </div>
-    <div className="kv-workbench-content" role="tabpanel">
+    <div className="kv-workbench-content custom-scrollbar" role="tabpanel">
       {issues.length > 0 && <ul className="kv-workbench-issues" aria-label={say('配置问题', 'Configuration issues')}>
         {issues.map((issue, index) => <li key={index} data-severity={issue.severity}>{issue.message}</li>)}
       </ul>}
       {tab === 'params' && <>
         {fields.length > 0 && <details className="kv-workbench-data" open>
           <summary>{say('插入上游数据', 'Insert upstream data')}</summary>
-          <label>{say('插入到参数末尾', 'Append to parameter')}
-            <select className="kv-input" value={targetPath} onChange={(event) => setTarget(event.target.value)}>
-              {fields.map((field) => <option key={field.path} value={field.path}>{fieldLabel(field.path)}</option>)}
-            </select>
-          </label>
+          <label>{say('插入到参数末尾', 'Append to parameter')}</label>
+          <Select
+            value={targetPath ?? ''}
+            onChange={setTarget}
+            ariaLabel={say('插入到参数末尾', 'Append to parameter')}
+            options={fields.map((field) => ({ value: field.path, label: fieldLabel(field.path) }))}
+          />
           {targetPath && <details><summary>{say('当前参数内容', 'Current parameter value')}</summary><pre>{fields.find((field) => field.path === targetPath)?.value || '—'}</pre></details>}
           {ancestors.length === 0 && <p>{say('先连接上游节点，再选择数据。', 'Connect an upstream node to select its data.')}</p>}
           {ancestors.map((source) => {
@@ -90,13 +93,19 @@ export function WorkflowWorkbench({ graph, node, run, running, issues, onChange,
         {isStepType(node.type) && <>
           <h3>{say('单节点测试', 'Test this node')}</h3>
           <p>{say('仅执行当前节点。文件写入、命令和通知等操作会真实执行。', 'Runs only this node. Writes, commands and notifications execute normally.')}</p>
-          <label>{say('测试输入', 'Test input')}<select className="kv-input" value={inputMode} onChange={(event) => setInputMode(event.target.value)}>
-            <option value="cache">{say('使用本次记录的输入', 'Use recorded input')}</option>
-            <option value="custom">{say('填写测试数据', 'Enter test data')}</option>
-          </select></label>
+          <label>{say('测试输入', 'Test input')}</label>
+          <Select
+            value={inputMode}
+            onChange={setInputMode}
+            ariaLabel={say('测试输入', 'Test input')}
+            options={[
+              { value: 'cache', label: say('使用本次记录的输入', 'Use recorded input') },
+              { value: 'custom', label: say('填写测试数据', 'Enter test data') },
+            ]}
+          />
           {inputMode === 'custom' && <>
-            <label>{say('文本输入', 'Text input')}<textarea className="kv-textarea" rows={4} value={text} onChange={(event) => setText(event.target.value)} /></label>
-            <label>JSON<textarea className="kv-textarea" rows={6} value={json} onChange={(event) => setJson(event.target.value)} /></label>
+            <label>{say('文本输入', 'Text input')}<textarea className="kv-textarea custom-scrollbar" rows={4} value={text} onChange={(event) => setText(event.target.value)} /></label>
+            <label>JSON<textarea className="kv-textarea custom-scrollbar" rows={6} value={json} onChange={(event) => setJson(event.target.value)} /></label>
             <p>{say('自定义输入支持 {{output}} 和 {{json.*}}；跨节点引用请使用缓存输入。', 'Custom input supports {{output}} and {{json.*}}; use recorded input for node references.')}</p>
           </>}
           <Button onClick={() => void test()} disabled={running || pending || !!node.data.disabled || (inputMode === 'cache' && !cached)}>{say('测试当前节点', 'Test this node')}</Button>

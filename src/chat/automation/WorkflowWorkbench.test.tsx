@@ -19,6 +19,14 @@ function setup(record: AutomationRun | null = run) {
   return { onTest, onChange }
 }
 describe('node workbench', () => {
+  it('uses the shared tabs, select menu, and scrollbar primitives', () => {
+    const { container } = render(<WorkflowWorkbench graph={graph} node={node} run={run} running={false} issues={[]} onTest={vi.fn()} onChange={vi.fn()}><div>参数表单</div></WorkflowWorkbench>)
+    expect(screen.getByRole('tablist')).toHaveClass('kv-seg')
+    expect(screen.getByLabelText('插入到参数末尾')).toHaveClass('kv-select')
+    expect(container.querySelector('.kv-workbench-content')).toHaveClass('custom-scrollbar')
+    expect(container.querySelector('select')).toBeNull()
+  })
+
   it('edits the connected Context prompt when inserting from an Agent node', () => {
     const agent = createFlowNode('action.agent', { label: 'Agent' }, { x: 0, y: 0 })
     const context = createFlowNode('agent.context', { label: 'Context', agent: { prompt: '处理：' } }, { x: 0, y: 0 })
@@ -47,7 +55,8 @@ describe('node workbench', () => {
     const { onTest } = setup(null)
     fireEvent.click(screen.getByRole('tab', { name: '输入 / 测试' }))
     expect(screen.getByRole('button', { name: '测试当前节点' })).toBeDisabled()
-    fireEvent.change(screen.getByLabelText('测试输入'), { target: { value: 'custom' } })
+    fireEvent.click(screen.getByLabelText('测试输入'))
+    fireEvent.click(screen.getByRole('option', { name: '填写测试数据' }))
     fireEvent.change(screen.getByLabelText('JSON'), { target: { value: '{' } })
     fireEvent.click(screen.getByRole('button', { name: '测试当前节点' }))
     expect(await screen.findByRole('alert')).toBeInTheDocument()

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createBlankAutomation, createFlowNode, connectNodes } from './graph'
-import { dataFields, insertReference, upstreamNodes, workflowIssues } from './workflowData'
+import { dataFields, insertReference, localizeValidationIssue, upstreamNodes, workflowIssues } from './workflowData'
 
 describe('workflow data mapping', () => {
   it('limits a context slot to its owning Agent’s upstream path', () => {
@@ -32,5 +32,30 @@ describe('workflow data mapping', () => {
     expect(workflowIssues(graph).filter((issue) => issue.nodeId === node.id && issue.severity === 'error')).toHaveLength(2)
     node.data.disabled = true
     expect(workflowIssues(graph).filter((issue) => issue.nodeId === node.id)).toHaveLength(0)
+  })
+
+  it('reports an Agent without a prompt or Context locally in the active language', () => {
+    const trigger = createFlowNode('trigger.manual', { label: 'start' }, { x: 0, y: 0 })
+    const agent = createFlowNode('action.agent', { label: 'agent' }, { x: 0, y: 0 })
+    const graph = {
+      ...createBlankAutomation(),
+      nodes: [trigger, agent],
+      edges: [connectNodes(trigger.id, agent.id)],
+    }
+    expect(workflowIssues(graph)).toContainEqual({
+      nodeId: agent.id,
+      severity: 'warning',
+      message: '填写 Agent 提示词，或连接一个 Context 节点；否则运行时会失败',
+    })
+    expect(workflowIssues(graph, true).find((issue) => issue.nodeId === agent.id)?.message)
+      .toContain('Add an Agent prompt')
+  })
+
+  it('localizes backend validation messages before rendering them', () => {
+    expect(localizeValidationIssue({
+      nodeId: 'agent',
+      severity: 'warning',
+      message: 'action.agent has no prompt and no agent.context slot; the step will fail at run time',
+    }).message).toBe('填写 Agent 提示词，或连接一个 Context 节点；否则运行时会失败')
   })
 })
