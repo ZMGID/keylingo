@@ -57,6 +57,7 @@ import {
 } from './messageNavigationStore'
 import { createLiveRowModel } from './liveRowModel'
 import { useLiveRowMeasurement } from './hooks/useLiveRowMeasurement'
+import { useChatWidthLayout } from './hooks/useChatWidthLayout'
 
 
 export interface AssistantStreamStats {
@@ -99,14 +100,6 @@ export interface MessageListProps {
 }
 
 const LIST_EDGE_PADDING_PX = 16
-
-// 内容宽度量化桶。layoutKey 里带着 contentWidth：若用原始 px，拖侧栏/Dock/改窗口宽时
-// 每变 1px 就换一个 key 空间 —— TanStack itemSizeCache 全 miss（所有行退回估算高、
-// totalSize 猛变、滚动位置跳），且 measurementBuckets 只留 8 个桶，一次拖动扫过上百个
-// 宽度值会把原宽度的桶也挤掉。旧实现（virtua 时代）有 MIGRATION_STEP 量化，TanStack
-// 重写时丢了（8791000）。行高对 32px 内的宽度差不敏感（换行差 ~4 个拉丁字符），
-// 真实高度由 measureElement 兜底。
-const CONTENT_WIDTH_BUCKET_PX = 32
 
 // 导航器高亮同步的最小间隔。这趟同步是 querySelectorAll + 逐行 getBoundingClientRect，
 // 若 virtualizer 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
@@ -316,8 +309,6 @@ function MessageListBase({
   // hook 需要通过 state 拿到元素以便重新绑定监听；virtualizer 需要 RefObject。回调 ref 同时喂两者。
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null)
-  // 初值取常见聊天列宽落进的桶（704 = 22×32），首个 RO tick 会立刻校正。
-  const [contentWidth, setContentWidth] = useState(704)
   const setScrollEl = useCallback((el: HTMLDivElement | null) => {
     scrollRef.current = el
     setViewportEl(el)
@@ -412,23 +403,6 @@ function MessageListBase({
     return finish
   }, [conversationId, contentEl])
 
-  useLayoutEffect(() => {
-    if (!contentEl) return
-    const updateWidth = (width: number) => {
-      // 量化到桶再落 state：拖动过程中只在跨桶时重渲/换 layoutKey（见 CONTENT_WIDTH_BUCKET_PX）。
-      const next = Math.max(280, Math.round(width / CONTENT_WIDTH_BUCKET_PX) * CONTENT_WIDTH_BUCKET_PX)
-      setContentWidth((current) => current === next ? current : next)
-    }
-    const rect = contentEl.getBoundingClientRect()
-    updateWidth(Math.max(0, rect.width - 48))
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width
-      if (typeof width === 'number') updateWidth(width)
-    })
-    observer.observe(contentEl)
-    return () => observer.disconnect()
-  }, [contentEl])
   const prevMessageCountRef = useRef(0)
   const [activeNavigatorNodeId, setActiveNavigatorNodeId] = useState<string | null>(null)
   const [visibleNavigatorNodeIds, setVisibleNavigatorNodeIds] = useState<string[]>([])
@@ -491,6 +465,9 @@ function MessageListBase({
     trackKeys: true,
     growthSignal: streamGrowthSignal,
   })
+  const { contentWidth, anchorRef: widthAnchorRef, prepareWidthChange, restoreAnchor: restoreWidthAnchor } = useChatWidthLayout(
+    contentEl, viewportEl, followHandle, navigationLockRef,
+  )
 
   // Preserve the reader's follow intent while the row changes positioning at settle.
   const streamFollowIntentRef = useRef(true)
@@ -815,6 +792,7 @@ function MessageListBase({
     () => restoreMeasurementSnapshot(conversationId, layoutKey, measurementRevision),
     [conversationId, layoutKey, measurementRevision],
   )
+  const widthAnchorIndex = widthAnchorRef.current?.index ?? null
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: itemCount,
     enabled: true,
@@ -837,6 +815,7 @@ function MessageListBase({
     },
     initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
+      if (entry) prepareWidthChange(entry.borderBoxSize?.[0]?.inlineSize ?? element.offsetWidth)
       // TanStack's default sync path returns itemSizeCache when present. For
       // absolutely positioned chat rows that can leave the next row 10s of px
       // too early, so a mount must synchronously replace cache with real DOM size.
@@ -877,8 +856,8 @@ function MessageListBase({
     rangeExtractor: useCallback((range: Range) => {
       let indexes = defaultRangeExtractor(range)
       // 消息导航：目标行附近强制挂载渲染测高，再一次性跳转。
-      const forced = forceMountRenderIndex
-      if (forced != null && itemCount > 0) {
+      for (const forced of [forceMountRenderIndex, widthAnchorIndex]) {
+        if (forced == null || itemCount === 0) continue
         const from = Math.max(0, forced - NAVIGATOR_FORCE_MOUNT_RADIUS)
         const to = Math.min(itemCount - 1, forced + NAVIGATOR_FORCE_MOUNT_RADIUS)
         const set = new Set(indexes)
@@ -886,7 +865,7 @@ function MessageListBase({
         indexes = [...set].sort((a, b) => a - b)
       }
       return indexes
-    }, [forceMountRenderIndex, itemCount]),
+    }, [forceMountRenderIndex, itemCount, widthAnchorIndex]),
 
 
     overscan: 6,
@@ -904,7 +883,7 @@ function MessageListBase({
   })
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
     // 导航 prepare/hold 期间禁止测高改 scrollTop：那是点导航后上下抽的主因。
-    if (navigationLockRef.current) return false
+    if (navigationLockRef.current || widthAnchorRef.current) return false
     const anchor = disclosureAnchorRef.current
     if (anchor?.key === item.key && anchor.button.isConnected && viewportEl) {
       const button = anchor.button.getBoundingClientRect()
@@ -925,6 +904,7 @@ function MessageListBase({
   const measureHistoryRow = useCallback((element: HTMLDivElement | null) => {
     measureRow(element, virtualizer)
   }, [measureRow, virtualizer])
+  useLayoutEffect(() => { restoreWidthAnchor(virtualizer) })
   // Row ResizeObservers and TanStack's own viewport observer update mounted rows.
   // Avoid a blanket measure(): it clears the virtualizer's measured cache and makes
   // detached readers pay the estimate-to-real-height correction for every row.
@@ -1919,6 +1899,7 @@ function MessageListBase({
           data-index={virtualItem?.index}
           data-chat-item-key={virtualItem ? measurementKey(item) : undefined}
           data-chat-row-index={virtualItem?.index}
+          data-chat-reading-row={item.kind !== 'spacer' ? '' : undefined}
           data-message-id={item.kind === 'message' || item.kind === 'streaming' ? item.message.id : undefined}
           data-chat-message-list-item={item.kind}
           className={virtualItem ? 'absolute left-0 top-0 w-full pb-0.5' : 'w-full pb-0.5'}
@@ -1960,7 +1941,7 @@ function MessageListBase({
 
       >
         <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
-          <div className="relative w-full">
+          <div data-chat-rows-root className="relative w-full">
             <div aria-hidden="true" style={{ height: virtualizer.getTotalSize() }} />
             <div data-chat-message-list-item="tail" className="w-full pb-0.5">
               {renderTail()}

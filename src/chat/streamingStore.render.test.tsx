@@ -97,7 +97,7 @@ describe('MessageList ← streamingStore 集成', () => {
     expect(screen.queryByText('Answer from first')).not.toBeInTheDocument()
   })
 
-  it('keeps the live row, markdown and user-expanded process mounted through freeze and commit', async () => {
+  it.each([false, true])('keeps the live row, markdown and expanded process through freeze and commit (recovered: %s)', async (recovered) => {
     const user: ChatMessage = { id: 'continuous-user', role: 'user', content: 'question', timestamp: 1 }
     const content = '## Answer\n\nA **stable** answer.\n\n```ts\nconst answer = 42\n```'
     const segments = [
@@ -109,7 +109,7 @@ describe('MessageList ← streamingStore 集成', () => {
       setSnapshot(snapWith({ messageId: assistant.id, content, segments, streaming: true }))
       setCoarse({ streaming: true, streamFrozen: false })
     })
-    const { container, rerender } = render(<MessageList messages={[user]} conversationId="continuous-c1" />)
+    const { container, rerender } = render(<MessageList messages={recovered ? [user, assistant] : [user]} conversationId="continuous-c1" />)
     await flush()
     const row = container.querySelector(`[data-message-id="${assistant.id}"]`)
     const markdown = row?.querySelector('.chat-markdown')

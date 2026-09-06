@@ -18,6 +18,27 @@ function sync(
 }
 
 describe('createLiveRowModel', () => {
+  it.each([true, false])('remembers a recovered draft id before snapshot clearing (known at start: %s)', (knownAtStart) => {
+    const model = createLiveRowModel()
+    const historyAssistantIds = ['older', 'recovered']
+    const { liveKey } = sync(model, {
+      liveActive: true,
+      preferredTwinId: knownAtStart ? 'recovered' : null,
+      historyAssistantIds,
+    })
+    sync(model, { liveActive: true, preferredTwinId: 'recovered', historyAssistantIds })
+    // Completion clears the stream store; persistence replaces the existing
+    // draft, so the assistant count does not increase.
+    sync(model, { liveActive: false, historyAssistantIds })
+    expect(model.resolveMessageKey('recovered')).toBe(liveKey)
+    expect(model.resolveMessageKey('older')).toBe('older')
+
+    const next = sync(model, { liveActive: true, historyAssistantIds })
+    sync(model, { liveActive: false, historyAssistantIds: [...historyAssistantIds, 'next'] })
+    expect(model.resolveMessageKey('next')).toBe(next.liveKey)
+    expect(model.resolveMessageKey('recovered')).toBe(liveKey)
+  })
+
   it('settling a live turn keys the committed twin with the live row key', () => {
     const model = createLiveRowModel()
 
