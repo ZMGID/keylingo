@@ -5,6 +5,7 @@ const getSettingsMock = vi.fn()
 const saveSettingsMock = vi.fn()
 const importSettingsMock = vi.fn()
 const setFavoriteModelsMock = vi.fn()
+const onKivioConfigurationChangedMock = vi.fn()
 
 vi.mock('./tauri', () => ({
   api: {
@@ -12,6 +13,7 @@ vi.mock('./tauri', () => ({
     saveSettings: (...args: unknown[]) => saveSettingsMock(...args),
     importSettings: (...args: unknown[]) => importSettingsMock(...args),
     setFavoriteModels: (...args: unknown[]) => setFavoriteModelsMock(...args),
+    onKivioConfigurationChanged: (...args: unknown[]) => onKivioConfigurationChangedMock(...args),
   },
 }))
 
@@ -23,6 +25,8 @@ import {
   refreshSettings,
   saveSettingsCached,
   setFavoriteModelsCached,
+  startBackendSettingsSync,
+  subscribeSettings,
 } from './settingsCache'
 
 const settingsA = { theme: 'dark', providers: [], favoriteModels: [] } as unknown as Settings
@@ -34,9 +38,31 @@ beforeEach(() => {
   saveSettingsMock.mockReset()
   importSettingsMock.mockReset()
   setFavoriteModelsMock.mockReset()
+  onKivioConfigurationChangedMock.mockReset()
 })
 
 describe('settingsCache', () => {
+  it('backend changes refresh subscribers and late initial reads cannot restore old settings', async () => {
+    let emit: (() => void) | undefined
+    const unlisten = vi.fn()
+    onKivioConfigurationChangedMock.mockImplementation(async (listener: () => void) => { emit = listener; return unlisten })
+    let finishInitial: ((settings: Settings) => void) | undefined
+    getSettingsMock.mockImplementationOnce(() => new Promise<Settings>((resolve) => { finishInitial = resolve }))
+    const initial = getSettingsCached()
+    const subscriber = vi.fn()
+    subscribeSettings(subscriber)
+    const stop = await startBackendSettingsSync()
+    getSettingsMock.mockResolvedValueOnce(settingsB)
+    emit?.()
+    await vi.waitFor(() => expect(subscriber).toHaveBeenCalledWith(settingsB))
+    finishInitial?.(settingsA)
+    await expect(initial).resolves.toBe(settingsB)
+    expect(peekSettings()).toBe(settingsB)
+    stop()
+    emit?.()
+    expect(getSettingsMock).toHaveBeenCalledTimes(2)
+    expect(unlisten).toHaveBeenCalledOnce()
+  })
   it('并发首读只发一次 invoke，之后命中缓存不再发', async () => {
     getSettingsMock.mockResolvedValue(settingsA)
     const [first, second] = await Promise.all([getSettingsCached(), getSettingsCached()])

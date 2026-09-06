@@ -3,6 +3,16 @@ import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import './index.css'
 import 'streamdown/styles.css'
+import { isTauriRuntime } from './api/tauri'
+import { startBackendSettingsSync } from './api/settingsCache'
+
+if (isTauriRuntime()) {
+  const backendSettingsSync = startBackendSettingsSync().catch((error) => {
+    console.error('[settingsCache] could not subscribe to backend updates', error)
+    return () => {}
+  })
+  if (import.meta.hot) import.meta.hot.dispose(() => { void backendSettingsSync.then((stop) => stop()) })
+}
 
 // 屏蔽 WebView 原生右键菜单（Back/Reload/Inspect）
 document.addEventListener('contextmenu', (e) => e.preventDefault())

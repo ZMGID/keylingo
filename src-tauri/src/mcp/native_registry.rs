@@ -362,6 +362,26 @@ pub static NATIVE_TOOLS: &[NativeToolEntry] = &[
         call: NativeToolCall::SyncResult(call_present_artifacts),
     },
     NativeToolEntry {
+        name: "kivio_inspect",
+        def: crate::self_config::inspect_definition,
+        enabled: |native, _, _| native.read_file,
+        parallel_safe: false,
+        bypasses_approval: false,
+        read_only: true,
+        requires_session_consent: true,
+        call: NativeToolCall::Async(crate::self_config::inspect),
+    },
+    NativeToolEntry {
+        name: "kivio_configure",
+        def: crate::self_config::configure_definition,
+        enabled: |native, _, _| native.run_command,
+        parallel_safe: false,
+        bypasses_approval: false,
+        read_only: false,
+        requires_session_consent: true,
+        call: NativeToolCall::Async(crate::self_config::configure),
+    },
+    NativeToolEntry {
         name: "memory_read",
         def: native_memory_read_tool,
         enabled: |_, _, memory_enabled| memory_enabled,
@@ -1228,6 +1248,8 @@ mod tests {
         "kill_background",
         "save_assistant",
         "present_artifacts",
+        "kivio_inspect",
+        "kivio_configure",
         "memory_read",
         "memory_modify",
         "memory_search",
@@ -1254,12 +1276,14 @@ mod tests {
                 "edit",
                 "bash",
                 "bash_output",
-                "kill_background"
+                "kill_background",
+                "kivio_inspect",
+                "kivio_configure"
             ],
             "session-consent set must be exactly the file/shell tools (read now also \
              lists directories; `ls` is the standalone kivio-code list_dir tool; find \
              is renamed glob) plus the background-command observability tools (gated \
-             identically to bash); a new file/shell tool MUST set \
+             identically to bash) and Kivio configuration tools; a new file/shell tool MUST set \
              requires_session_consent or it silently bypasses the consent gate"
         );
         // The predicate agrees with the flag, and non-file tools are excluded.
@@ -1362,6 +1386,7 @@ mod tests {
                 "glob",
                 "bash_output",
                 "present_artifacts",
+                "kivio_inspect",
                 "memory_read",
                 "memory_search",
             ],
@@ -1449,7 +1474,7 @@ mod tests {
         read_only.read_file = true;
         assert_eq!(
             names(&read_only, false, false),
-            ["read", "grep", "glob", "present_artifacts"]
+            ["read", "grep", "glob", "present_artifacts", "kivio_inspect"]
         );
 
         // The write gate exposes the whole-file write tool only. File cards are
@@ -1524,6 +1549,8 @@ mod tests {
                 "bash_output",
                 "kill_background",
                 "present_artifacts",
+                "kivio_inspect",
+                "kivio_configure",
                 "memory_read",
                 "memory_modify",
                 "memory_search",

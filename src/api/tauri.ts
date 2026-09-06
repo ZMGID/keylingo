@@ -1926,6 +1926,7 @@ export const api = {
   providerOAuthDisconnect: (credentialId: string) => invoke<void>('provider_oauth_disconnect', { credentialId }),
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),
+  onKivioConfigurationChanged: (listener: () => void) => on('kivio-configuration-changed', () => listener()),
   // 某模型可选的思考等级列表（用户覆盖 modelOverrides → 模型库 reasoningEfforts → 家族兜底）。
   reasoningEffortsForModel: (model: string, providerId?: string) =>
     invoke<string[]>('chat_reasoning_efforts_for_model', { model, providerId }),

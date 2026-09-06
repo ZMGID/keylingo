@@ -31,6 +31,7 @@ pub mod replace_translation;
 #[cfg(target_os = "macos")]
 pub mod sck;
 pub mod screenshot;
+pub mod self_config;
 pub mod settings;
 pub mod shortcuts;
 pub mod skills;

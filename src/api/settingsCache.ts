@@ -7,9 +7,8 @@ import { api, type Settings } from './tauri'
  * normalizeSettings；一次 chat 冷启动会独立发起 5-6 次。缓存后首读之外全部即时返回，
  * SettingsShell 还能用 peekSettings 做 stale-while-revalidate 首帧渲染。
  *
- * 跨窗口一致性（刻意豁免）：缓存随各自 webview 存亡。translator/lens 是短命窗口
- * （用完销毁），缓存随之丢弃；settings 编辑入口只存在于 chat 窗口内，其他窗口存活
- * 期间不会写 settings，因此接受理论上的窗口间 staleness，不做跨窗口失效广播。
+ * 自配置工具成功后广播 kivio-configuration-changed，各 webview 强制读取并通知
+ * 订阅者。广播不携带设置或凭据。其它未广播的写入仍使用下面的现读策略。
  *
  * 已知局限（后端旁路写）：后端会直接改 settings 并落盘、不经前端 saveSettings——
  * OAuth 令牌刷新（mcp/manager.rs persist_refreshed_server）改 servers[].auth/headers；
@@ -25,6 +24,7 @@ import { api, type Settings } from './tauri'
 
 let cached: Settings | null = null
 let inflight: Promise<Settings> | null = null
+let readGeneration = 0
 
 /** 缓存更新订阅者。saveSettingsCached / refreshSettings / importSettingsCached 等
  *  任何写缓存的路径都会广播新 Settings，让"挂载时读一次"的消费方（如 ModelSelector）
@@ -61,10 +61,11 @@ export function peekSettings(): Settings | null {
 export function getSettingsCached(): Promise<Settings> {
   if (cached) return Promise.resolve(cached)
   if (inflight) return inflight
+  const generation = ++readGeneration
   inflight = api.getSettings()
     .then((settings) => {
-      cached = settings
-      return settings
+      if (generation === readGeneration) cached = settings
+      return cached ?? settings
     })
     .finally(() => {
       inflight = null
@@ -74,16 +75,32 @@ export function getSettingsCached(): Promise<Settings> {
 
 /** 强制 refetch 并更新缓存（后台校准用）。失败时保留旧缓存。 */
 export function refreshSettings(): Promise<Settings> {
+  const generation = ++readGeneration
   return api.getSettings().then((settings) => {
-    cached = settings
-    notifySettingsUpdated(settings)
-    return settings
+    if (generation === readGeneration) {
+      cached = settings
+      notifySettingsUpdated(settings)
+    }
+    return cached ?? settings
   })
+}
+
+/** Backend agent operations update live settings outside saveSettingsCached.
+ * Subscribe once per webview so existing consumers can rebase their drafts.
+ * The event has no secrets; a failed refetch never synthesizes defaults. */
+export async function startBackendSettingsSync(): Promise<() => void> {
+  let stopped = false
+  const unlisten = await api.onKivioConfigurationChanged(() => {
+    if (stopped) return
+    void refreshSettings().catch((error) => console.error('[settingsCache] backend refresh failed', error))
+  })
+  return () => { stopped = true; unlisten() }
 }
 
 /** saveSettings + 成功写通缓存并广播；失败原样抛出且不动缓存。 */
 export async function saveSettingsCached(settings: Settings): Promise<Settings> {
   const saved = await api.saveSettings(settings)
+  ++readGeneration
   cached = saved
   notifySettingsUpdated(saved)
   return saved
@@ -95,6 +112,7 @@ export async function saveSettingsCached(settings: Settings): Promise<Settings> 
  */
 export async function importSettingsCached(path: string): Promise<Settings> {
   const imported = await api.importSettings(path)
+  ++readGeneration
   cached = imported
   notifySettingsUpdated(imported)
   return imported
@@ -108,6 +126,7 @@ export async function setFavoriteModelsCached(models: string[]): Promise<void> {
   await api.setFavoriteModels(models)
   // 后端 set_favorite_models 会按序去重落盘；缓存里也做同样去重，保持与磁盘一致。
   if (cached) {
+    ++readGeneration
     cached = { ...cached, favoriteModels: [...new Set(models)] }
     notifySettingsUpdated(cached)
   }
@@ -122,6 +141,7 @@ export async function setTranslateCardSizeCached(width: number): Promise<void> {
   await api.setTranslateCardSize(width)
   const clamped = Math.max(360, Math.min(720, Math.round(width)))
   if (cached) {
+    ++readGeneration
     cached = { ...cached, screenshotTranslation: { ...cached.screenshotTranslation, cardWidth: clamped } }
     notifySettingsUpdated(cached)
   }
@@ -131,5 +151,6 @@ export async function setTranslateCardSizeCached(width: number): Promise<void> {
 export function __resetSettingsCacheForTest(): void {
   cached = null
   inflight = null
+  readGeneration = 0
   listeners.clear()
 }
