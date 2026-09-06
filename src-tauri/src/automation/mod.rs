@@ -17,7 +17,7 @@ mod events;
 mod history;
 mod hotkeys;
 mod interpolate;
-mod notify;
+pub(crate) mod notify;
 mod runner;
 mod schedule;
 mod storage;

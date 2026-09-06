@@ -442,7 +442,7 @@ async fn execute_node(
             } else {
                 "Kivio 自动化"
             };
-            notify::show(title, &body);
+            notify::show(app, title, &body);
             Ok((NodeOutput::from_text(body), None))
         }
         "action.http" => {

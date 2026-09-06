@@ -72,6 +72,7 @@ pub(super) async fn run_reply_fan_out(
     let results = futures::future::join_all(arm_futures).await;
 
     let mut produced = 0usize;
+    let mut completed = 0usize;
     let mut cancelled = 0usize;
     let mut first_error: Option<String> = None;
     let mut terminals = Vec::new();
@@ -82,6 +83,9 @@ pub(super) async fn run_reply_fan_out(
                 run_id,
                 error: _,
             }) => {
+                if message.stream_outcome.as_deref() == Some("completed") {
+                    completed += 1;
+                }
                 if let Some(run_id) = run_id {
                     terminals.push((
                         run_id,
@@ -232,6 +236,13 @@ pub(super) async fn run_reply_fan_out(
                 &outcome,
                 &content,
                 conversation.revision,
+            );
+        }
+        if completed > 0 {
+            crate::chat::completion_notification::notify_reply_completed(
+                app,
+                state.inner(),
+                conversation,
             );
         }
         return Ok(());

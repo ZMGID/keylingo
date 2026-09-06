@@ -55,7 +55,7 @@ pub(super) async fn complete_assistant_reply(
     active_skill_id: Option<&str>,
     entry: crate::chat::agent::AgentRunEntry,
 ) -> Result<(), String> {
-    complete_assistant_reply_inner(
+    let outcome = complete_assistant_reply_inner(
         app,
         state,
         conversation,
@@ -67,8 +67,15 @@ pub(super) async fn complete_assistant_reply(
         None,
         false,
     )
-    .await
-    .map(|_| ())
+    .await;
+    if outcome.is_ok() {
+        crate::chat::completion_notification::notify_reply_completed(
+            app,
+            state.inner(),
+            conversation,
+        );
+    }
+    outcome.map(|_| ())
 }
 
 /// 共享实现：`arm = None` 为单模型现状（直接落盘，返回 `Ok(())` 语义不变）；
