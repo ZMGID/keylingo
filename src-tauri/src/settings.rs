@@ -1608,6 +1608,9 @@ pub struct Settings {
     /// 高频开关 / 低配机可避免每次冷创建的启动延迟和风扇起来。
     #[serde(default = "default_false")]
     pub keep_chat_window_alive: bool,
+    /// 回复完成时发送系统通知；默认开启，正在查看该对话时不提醒。
+    #[serde(default = "default_true")]
+    pub chat_completion_notifications: bool,
     #[serde(default)]
     pub translator_provider_id: String,
     #[serde(default = "default_openai_model")]
@@ -1822,6 +1825,7 @@ impl Default for Settings {
             launch_at_startup: false,
             launch_minimized_to_tray: false,
             keep_chat_window_alive: false,
+            chat_completion_notifications: true,
             translator_provider_id: "default-translator".to_string(),
             translator_model: "gpt-4o".to_string(),
             chat_provider_id: String::new(),
@@ -3215,6 +3219,23 @@ mod tests {
         let settings: Settings =
             serde_json::from_str("{}").expect("legacy settings should deserialize");
         assert!(!settings.keep_chat_window_alive);
+    }
+
+    #[test]
+    fn chat_completion_notifications_are_enabled_for_new_and_legacy_settings() {
+        assert!(Settings::default().chat_completion_notifications);
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.chat_completion_notifications);
+    }
+
+    #[test]
+    fn chat_completion_notifications_preserve_disabled_setting_on_save_and_reload() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"chatCompletionNotifications":false}"#).unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["chatCompletionNotifications"], false);
+        let reloaded: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!reloaded.chat_completion_notifications);
     }
 
     #[test]

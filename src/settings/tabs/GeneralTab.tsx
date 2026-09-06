@@ -211,7 +211,7 @@ export function AppearanceGroup({
   )
 }
 
-/** 行为：开机自启 / 启动后最小化到托盘 / 关闭时保持聊天窗口 / 失败重试。 */
+/** 行为：开机自启 / 启动后最小化到托盘 / 关闭时保持聊天窗口 / 回复完成通知 / 失败重试。 */
 export function BehaviorGroup({
   settings,
   t,
@@ -250,10 +250,18 @@ export function BehaviorGroup({
           ariaLabel={t.keepChatWindowAlive}
         />
       </SettingRow>
+      <SettingRow label={t.chatCompletionNotifications} description={t.chatCompletionNotificationsDesc}>
+        <Toggle
+          checked={settings.chatCompletionNotifications ?? true}
+          onChange={(v) => onUpdateSettings({ chatCompletionNotifications: v })}
+          ariaLabel={t.chatCompletionNotifications}
+        />
+      </SettingRow>
       <SettingRow label={t.retryEnabled}>
         <Toggle
           checked={settings.retryEnabled ?? true}
           onChange={(v) => onUpdateSettings({ retryEnabled: v })}
+          ariaLabel={t.retryEnabled}
         />
       </SettingRow>
       {settings.retryEnabled !== false && (

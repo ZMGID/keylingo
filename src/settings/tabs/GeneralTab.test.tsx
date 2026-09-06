@@ -104,7 +104,7 @@ describe('BehaviorGroup', () => {
     const toggles = screen.getAllByRole('switch')
     await userEvent.click(toggles[0])
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ launchAtStartup: true })
-    await userEvent.click(toggles[3])
+    await userEvent.click(screen.getByRole('switch', { name: t.retryEnabled }))
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ retryEnabled: false })
   })
 
@@ -119,6 +119,22 @@ describe('BehaviorGroup', () => {
     const props = renderGroup()
     await userEvent.click(screen.getByRole('switch', { name: t.keepChatWindowAlive }))
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ keepChatWindowAlive: true })
+  })
+
+  it('回复完成通知默认开启，可以关闭', async () => {
+    const props = renderGroup()
+    const toggle = screen.getByRole('switch', { name: t.chatCompletionNotifications })
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(toggle)
+    expect(props.onUpdateSettings).toHaveBeenCalledWith({ chatCompletionNotifications: false })
+  })
+
+  it('已关闭的回复完成通知正确回显，可以重新开启', async () => {
+    const props = renderGroup({ settings: makeSettings({ chatCompletionNotifications: false }) })
+    const toggle = screen.getByRole('switch', { name: t.chatCompletionNotifications })
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    await userEvent.click(toggle)
+    expect(props.onUpdateSettings).toHaveBeenCalledWith({ chatCompletionNotifications: true })
   })
 })
 
