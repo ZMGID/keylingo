@@ -130,6 +130,27 @@ pub async fn run_external_cli_reply(
     active_skill_id: Option<&str>,
     entry: AgentRunEntry,
 ) -> Result<(), String> {
+    run_external_cli_reply_in(
+        app, state, conversation, title_from_first_user, latest_user_message,
+        image_paths, file_paths, active_skill_id, entry, None,
+    )
+    .await
+}
+
+/// Automation steps share a workspace even though each CLI has its own session.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_external_cli_reply_in(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    conversation: &mut Conversation,
+    title_from_first_user: Option<&str>,
+    latest_user_message: &str,
+    image_paths: &[std::path::PathBuf],
+    file_paths: &[std::path::PathBuf],
+    active_skill_id: Option<&str>,
+    entry: AgentRunEntry,
+    working_directory: Option<&std::path::Path>,
+) -> Result<(), String> {
     let settings = state.settings_read().clone();
     let agent_id = conversation
         .agent_runtime
@@ -141,7 +162,14 @@ pub async fn run_external_cli_reply(
     let def = get_agent_def(&agent_id).ok_or_else(|| format!("未知外部 Agent: {agent_id}"))?;
 
     // CLI 要在这个目录里真的跑起来 ⇒ 必须确保存在（唯一需要建目录的路径之一）。
-    let cwd = ensure_effective_cwd(app, &conversation.id, conversation.project_id.as_deref())?;
+    let cwd = match working_directory {
+        Some(path) => {
+            std::fs::create_dir_all(path)
+                .map_err(|err| format!("create automation workspace: {err}"))?;
+            crate::utils::strip_windows_verbatim_prefix(path.to_path_buf())
+        }
+        None => ensure_effective_cwd(app, &conversation.id, conversation.project_id.as_deref())?,
+    };
     // N2：回复路径不再跑完整检测（version/auth/模型探测可达 10-25s）。可用性/auth 的展示
     // 交给列表阶段；这里只解析二进制（唯一必需项），把第 2+ 轮的前置开销压到 <500ms。
     let probe_start = Instant::now();
@@ -306,6 +334,11 @@ pub async fn run_external_cli_reply(
     // `runtimeWorkspaceRoots` 下发。其它协议忽略这个字段。
     let extra_writable_roots = {
         let mut roots = extra_dirs.clone();
+        if working_directory.is_some() {
+            // A resumed Codex thread may still have the old conversation cwd
+            // in its sandbox roots. Explicitly supply the automation workspace.
+            roots.push(cwd.to_string_lossy().to_string());
+        }
         if !image_blocks.is_empty() {
             roots.push(std::env::temp_dir().to_string_lossy().to_string());
         }

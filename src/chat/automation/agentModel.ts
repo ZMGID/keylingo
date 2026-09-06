@@ -197,8 +197,8 @@ export function slotAttachPosition(
 ): { x: number, y: number } {
   const col = Math.max(0, AGENT_SLOTS.indexOf(slot))
   return {
-    x: agent.x + FLOW_AGENT_WIDTH * (0.125 + col * 0.25) - 36 + index * 18,
-    y: agent.y + 168 + index * 96,
+    x: agent.x + FLOW_AGENT_WIDTH / 2 + (col - 1.5) * 216 - 36,
+    y: agent.y + 240 + index * 216,
   }
 }
 
@@ -237,7 +237,7 @@ export function composeAgent(
     if (edge.target !== agentId || !isSlotEdge(edge)) continue
     const src = byId.get(edge.source)
     if (!src) continue
-    const part = normalizeAgent(src.data.agent)
+    const part = normalizeAgent(src.data.disabled ? undefined : src.data.agent)
     switch (edge.targetHandle) {
       case 'runtime':
         runtime = part

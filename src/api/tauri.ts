@@ -18,7 +18,7 @@ import type {
   ChatRunEventEnvelope,
   ChatSegmentPayload as GeneratedChatSegmentPayload,
 } from '../generated/chatProtocol'
-import type { Automation, AutomationChangedEvent, AutomationMeta, AutomationRunEvent, AutomationRunStarted, AutomationRunSummary } from '../chat/automation/types'
+import type { Automation, AutomationChangedEvent, AutomationMeta, AutomationRun, AutomationRunEvent, AutomationRunStarted, AutomationRunSummary } from '../chat/automation/types'
 
 // ========== 类型定义 ==========
 
@@ -2043,6 +2043,7 @@ export const api = {
     invoke<void>('automation_export', { id, path }),
   automationImport: (path: string) => invoke<Automation>('automation_import', { path }),
   automationRunsList: (id: string) => invoke<AutomationRunSummary[]>('automation_runs_list', { id }),
+  automationActiveRun: (id: string) => invoke<AutomationRun | null>('automation_active_run', { id }),
   onAutomationRun: (listener: (payload: AutomationRunEvent) => void) =>
     on<AutomationRunEvent>('automation-run', listener),
   onAutomationChanged: (listener: (payload: AutomationChangedEvent) => void) =>

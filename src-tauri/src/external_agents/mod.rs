@@ -33,3 +33,4 @@ pub mod workspace;
 pub mod wsl;
 
 pub use run::{run_external_cli_reply, run_external_cli_slash_command};
+pub(crate) use run::run_external_cli_reply_in;

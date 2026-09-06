@@ -2,6 +2,7 @@ use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
+use futures::FutureExt;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -45,6 +46,9 @@ pub fn enqueue(
     if automation.nodes.is_empty() {
         return Err("automation has no nodes".to_string());
     }
+    if start_trigger(&automation, origin).is_none() {
+        return Err("no enabled trigger for this run".to_string());
+    }
     let state = app.state::<AppState>();
     let run_id = Uuid::new_v4().to_string();
     {
@@ -63,32 +67,70 @@ pub fn enqueue(
         active.insert(id.clone(), run_id.clone());
     }
 
+    let mut record = AutomationRun {
+        id: run_id.clone(),
+        automation_id: id.clone(),
+        origin: origin.as_str().into(),
+        status: "running".into(),
+        started_at: now_iso(),
+        finished_at: None,
+        error: None,
+        nodes: Vec::new(),
+    };
+    let cleanup = RunCleanup {
+        app: app.clone(),
+        id,
+        run_id: run_id.clone(),
+    };
+    history::write_run(&app, &record)?;
     let app_run = app.clone();
     let run_id_spawn = run_id.clone();
     tauri::async_runtime::spawn(async move {
-        let status = execute_graph(
+        let _cleanup = cleanup;
+        let outcome = std::panic::AssertUnwindSafe(execute_graph(
             &app_run,
             automation,
             origin,
             until_node_id,
             &run_id_spawn,
             input,
-        )
+            &mut record,
+        ))
+        .catch_unwind()
         .await;
-        let state = app_run.state::<AppState>();
+        if outcome.is_err() {
+            let _ = finish_run(
+                &app_run,
+                &mut record,
+                "error",
+                Some("automation execution panicked".into()),
+            );
+        }
+    });
+    Ok(AutomationRunStarted { run_id })
+}
+
+/// Release the concurrency slot even if the future panics or is dropped.
+struct RunCleanup {
+    app: AppHandle,
+    id: String,
+    run_id: String,
+}
+
+impl Drop for RunCleanup {
+    fn drop(&mut self) {
+        let state = self.app.state::<AppState>();
         state
             .automation_active_runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
+            .remove(&self.id);
         state
             .automation_cancelled_runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&run_id_spawn);
-        let _ = status;
-    });
-    Ok(AutomationRunStarted { run_id })
+            .remove(&self.run_id);
+    }
 }
 
 /// 退出前兜底：把所有运行中的自动化标记取消。返回条数。
@@ -146,10 +188,7 @@ pub fn cancel(app: &AppHandle, id: &str) -> Result<(), String> {
     if let Ok(automation) = storage::get(app, id) {
         for node in automation.nodes {
             if node.node_type == "action.agent" {
-                state.cancel_chat_generation(&workspace::external_conversation_id(
-                    id,
-                    &node.id,
-                ));
+                state.cancel_chat_generation(&workspace::external_conversation_id(id, &node.id));
             }
         }
     }
@@ -171,26 +210,15 @@ async fn execute_graph(
     until_node_id: Option<String>,
     run_id: &str,
     input: Option<NodeOutput>,
+    record: &mut AutomationRun,
 ) -> Result<(), String> {
-    let started_at = now_iso();
-    let mut record = AutomationRun {
-        id: run_id.to_string(),
-        automation_id: automation.id.clone(),
-        origin: origin.as_str().to_string(),
-        status: "running".into(),
-        started_at: started_at.clone(),
-        finished_at: None,
-        error: None,
-        nodes: Vec::new(),
-    };
-    let _ = history::write_run(app, &record);
     events::run_started(app, &automation.id, run_id);
 
     let Some(trigger) = start_trigger(&automation, origin) else {
         return finish_run(app, record, "error", Some("no trigger node".into()));
     };
 
-    let mut incoming = seed_incoming(origin, &started_at, input);
+    let mut incoming = seed_incoming(origin, &record.started_at, input);
     let mut queue = VecDeque::from([(trigger.id.clone(), incoming.clone())]);
     let mut visited = HashSet::new();
     let mut hit_until = until_node_id.is_none();
@@ -206,24 +234,39 @@ async fn execute_graph(
             return finish_run(app, record, "error", Some("missing node".into()));
         };
 
+        record.nodes.push(AutomationRunNode {
+            node_id: node.id.clone(),
+            node_type: node.node_type.clone(),
+            status: "running".into(),
+            output: None,
+            error: None,
+        });
+        let node_index = record.nodes.len() - 1;
+        let _ = history::write_run(app, record);
         events::node_started(app, &automation.id, run_id, &node.id);
         let result = execute_node(app, &automation, run_id, node, &prev, origin).await;
         let handle_hint = match result {
             Ok((output, next_handle)) => {
                 let preview = clip(&output.text, 2000);
-                record.nodes.push(AutomationRunNode {
+                let status = if node_disabled(&node.data) {
+                    "skipped"
+                } else {
+                    "success"
+                };
+                record.nodes[node_index] = AutomationRunNode {
                     node_id: node.id.clone(),
                     node_type: node.node_type.clone(),
-                    status: "success".into(),
+                    status: status.into(),
                     output: Some(preview.clone()),
                     error: None,
-                });
+                };
+                let _ = history::write_run(app, record);
                 events::node_finished(
                     app,
                     &automation.id,
                     run_id,
                     &node.id,
-                    "success",
+                    status,
                     Some(preview),
                     None,
                 );
@@ -233,13 +276,13 @@ async fn execute_graph(
             Err(err) => {
                 let cancelled = err == "cancelled" || is_cancelled(app, run_id);
                 let status = if cancelled { "cancelled" } else { "error" };
-                record.nodes.push(AutomationRunNode {
+                record.nodes[node_index] = AutomationRunNode {
                     node_id: node.id.clone(),
                     node_type: node.node_type.clone(),
                     status: status.into(),
                     output: None,
                     error: Some(err.clone()),
-                });
+                };
                 events::node_finished(
                     app,
                     &automation.id,
@@ -281,14 +324,29 @@ async fn execute_graph(
 
 fn finish_run(
     app: &AppHandle,
-    mut record: AutomationRun,
+    record: &mut AutomationRun,
     status: &str,
     error: Option<String>,
 ) -> Result<(), String> {
     record.status = status.to_string();
     record.finished_at = Some(now_iso());
     record.error = error.clone();
-    let _ = history::write_run(app, &record);
+    for node in &mut record.nodes {
+        if node.status == "running" {
+            node.status = status.to_string();
+            node.error = error.clone();
+            events::node_finished(
+                app,
+                &record.automation_id,
+                &record.id,
+                &node.node_id,
+                status,
+                None,
+                error.clone(),
+            );
+        }
+    }
+    let _ = history::write_run(app, record);
     events::run_finished(app, &record.automation_id, &record.id, status, error);
     Ok(())
 }
@@ -347,7 +405,10 @@ async fn execute_node(
             Ok((NodeOutput::from_text(body), None))
         }
         "action.http" => {
-            let output = execute_http(app, node, prev).await?;
+            let output = tokio::select! {
+                result = execute_http(app, node, prev) => result?,
+                _ = wait_until_cancelled(app, run_id) => return Err("cancelled".into()),
+            };
             Ok((output, None))
         }
         "logic.if" => {
@@ -377,10 +438,7 @@ async fn execute_node(
         "logic.switch" => {
             let handle = eval_switch(node, prev);
             Ok((
-                NodeOutput::with_json(
-                    handle.clone(),
-                    json!({ "result": handle.clone() }),
-                ),
+                NodeOutput::with_json(handle.clone(), json!({ "result": handle.clone() })),
                 Some(handle),
             ))
         }
@@ -411,11 +469,7 @@ fn build_set_output(fields: &Value, prev: &NodeOutput) -> NodeOutput {
     let mut map = serde_json::Map::new();
     if let Some(items) = fields.as_array() {
         for item in items {
-            let key = item
-                .get("key")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
+            let key = item.get("key").and_then(Value::as_str).unwrap_or("").trim();
             if key.is_empty() {
                 continue;
             }
@@ -441,7 +495,10 @@ async fn execute_delay(app: &AppHandle, run_id: &str, node: &FlowNode) -> Result
         .data
         .get("delay")
         .and_then(|v| v.get("seconds"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
         .unwrap_or(1)
         .clamp(1, 600);
     let sleep = tokio::time::sleep(Duration::from_secs(seconds));
@@ -522,7 +579,10 @@ async fn execute_command(
     prev: &NodeOutput,
 ) -> Result<NodeOutput, String> {
     let spec = node.data.get("command").cloned().unwrap_or(Value::Null);
-    let cmd = interpolate(spec.get("command").and_then(Value::as_str).unwrap_or(""), prev);
+    let cmd = interpolate(
+        spec.get("command").and_then(Value::as_str).unwrap_or(""),
+        prev,
+    );
     if cmd.trim().is_empty() {
         return Err("command is empty".to_string());
     }
@@ -532,7 +592,10 @@ async fn execute_command(
         .unwrap_or(false);
     let timeout_ms = spec
         .get("timeoutSeconds")
-        .and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
         .unwrap_or(30)
         .saturating_mul(1000)
         .clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS);
@@ -651,10 +714,7 @@ fn eval_switch(node: &FlowNode, prev: &NodeOutput) -> String {
         let Some(id) = id else {
             continue;
         };
-        let op = case
-            .get("op")
-            .and_then(Value::as_str)
-            .unwrap_or("contains");
+        let op = case.get("op").and_then(Value::as_str).unwrap_or("contains");
         let expected = interpolate(
             case.get("value").and_then(Value::as_str).unwrap_or(""),
             prev,
@@ -675,12 +735,16 @@ fn start_trigger(automation: &Automation, origin: RunOrigin) -> Option<&FlowNode
     automation
         .nodes
         .iter()
+        .filter(|node| !node_disabled(&node.data))
         .find(|node| node.node_type == wanted)
         .or_else(|| {
+            if origin.is_production() {
+                return None;
+            }
             automation
                 .nodes
                 .iter()
-                .find(|node| node.node_type.starts_with("trigger."))
+                .find(|node| node.node_type.starts_with("trigger.") && !node_disabled(&node.data))
         })
 }
 
@@ -695,10 +759,7 @@ async fn execute_http(
         .and_then(|v| v.as_str())
         .unwrap_or("GET")
         .to_ascii_uppercase();
-    let url = interpolate(
-        http.get("url").and_then(|v| v.as_str()).unwrap_or(""),
-        prev,
-    );
+    let url = interpolate(http.get("url").and_then(|v| v.as_str()).unwrap_or(""), prev);
     let url = url.trim();
     if url.is_empty() {
         return Err("HTTP URL is empty".to_string());
@@ -707,10 +768,7 @@ async fn execute_http(
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err("HTTP node only allows http:// or https:// URLs".to_string());
     }
-    let headers_raw = http
-        .get("headers")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let headers_raw = http.get("headers").and_then(|v| v.as_str()).unwrap_or("");
     let body = interpolate(
         http.get("body").and_then(|v| v.as_str()).unwrap_or(""),
         prev,
@@ -736,25 +794,42 @@ async fn execute_http(
     if !body.is_empty() && method != "GET" {
         request = request.body(body);
     }
-    let response = tokio::time::timeout(HTTP_TIMEOUT, request.send())
-        .await
-        .map_err(|_| "HTTP request timed out".to_string())?
-        .map_err(|err| format!("HTTP request failed: {err}"))?;
-    let status = response.status().as_u16();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|err| format!("read HTTP body failed: {err}"))?;
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    if text.len() > HTTP_BODY_MAX {
-        text.truncate(HTTP_BODY_MAX);
-        text.push('…');
-    }
-    let display = format!("HTTP {status}\n{text}");
-    Ok(NodeOutput::with_json(
-        display,
-        json!({ "status": status, "body": text }),
-    ))
+    read_http_response(request, HTTP_TIMEOUT).await
+}
+
+async fn read_http_response(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> Result<NodeOutput, String> {
+    tokio::time::timeout(timeout, async {
+        let mut response = request
+            .send()
+            .await
+            .map_err(|err| format!("HTTP request failed: {err}"))?;
+        let status = response.status().as_u16();
+        // Read at most the preview budget plus one byte to detect truncation.
+        // Dropping the response here also closes an endless streaming body.
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| format!("read HTTP body failed: {err}"))?
+        {
+            let take = chunk.len().min(HTTP_BODY_MAX + 1 - bytes.len());
+            bytes.extend_from_slice(&chunk[..take]);
+            if bytes.len() > HTTP_BODY_MAX {
+                break;
+            }
+        }
+        let text = clip_bytes(&String::from_utf8_lossy(&bytes), HTTP_BODY_MAX);
+        let display = format!("HTTP {status}\n{text}");
+        Ok(NodeOutput::with_json(
+            display,
+            json!({ "status": status, "body": text }),
+        ))
+    })
+    .await
+    .map_err(|_| "HTTP request timed out".to_string())?
 }
 
 fn parse_headers(raw: &str) -> Vec<(String, String)> {
@@ -789,7 +864,11 @@ pub(crate) fn reaches(automation: &Automation, from: &str, until: &str) -> bool 
     false
 }
 
-pub(crate) fn next_node_ids(automation: &Automation, from: &str, handle: Option<&str>) -> Vec<String> {
+pub(crate) fn next_node_ids(
+    automation: &Automation,
+    from: &str,
+    handle: Option<&str>,
+) -> Vec<String> {
     automation
         .edges
         .iter()
@@ -873,11 +952,7 @@ fn merge_agent_object(spec: &mut serde_json::Map<String, Value>, part: &Value, k
 }
 
 fn compose_agent_spec(automation: &Automation, node: &FlowNode) -> Value {
-    let mut spec = node
-        .data
-        .get("agent")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let mut spec = node.data.get("agent").cloned().unwrap_or_else(|| json!({}));
     if !spec.is_object() {
         spec = json!({});
     }
@@ -892,7 +967,13 @@ fn compose_agent_spec(automation: &Automation, node: &FlowNode) -> Value {
         let Some(src) = automation.nodes.iter().find(|item| item.id == edge.source) else {
             continue;
         };
-        let part = src.data.get("agent").cloned().unwrap_or(json!({}));
+        // A connected disabled slot still shadows legacy inline configuration.
+        let part = if node_disabled(&src.data) {
+            json!({ "runtimeKind": "builtin", "externalAgentId": null, "externalModel": null,
+                "providerId": null, "model": null, "prompt": "", "toolIds": [], "skillIds": [] })
+        } else {
+            src.data.get("agent").cloned().unwrap_or(json!({}))
+        };
         let obj = spec.as_object_mut().expect("object");
         match edge.target_handle.as_deref() {
             Some("runtime") => merge_agent_object(
@@ -943,6 +1024,7 @@ fn compose_agent_spec(automation: &Automation, node: &FlowNode) -> Value {
         }
         if saw_skills {
             obj.insert("skillIds".into(), json!(skill_ids));
+            obj.remove("skillId");
         }
         match obj.get("runtimeKind").and_then(Value::as_str) {
             Some("external") => {
@@ -982,7 +1064,101 @@ pub(crate) fn clip_bytes(text: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::types::{FlowEdge, SCHEMA_VERSION, Vec2, Viewport};
+    use crate::automation::types::{FlowEdge, Vec2, Viewport, SCHEMA_VERSION};
+
+    async fn streaming_server(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            if !body.is_empty() {
+                socket
+                    .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&body).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            // Intentionally never terminate the body, even after sending its data.
+            std::future::pending::<()>().await;
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn http_stops_reading_at_budget_without_waiting_for_eof_or_panicking_on_cjk() {
+        let (url, server) = streaming_server("中".repeat(18_000).into_bytes()).await;
+        let request = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url);
+        let output = read_http_response(request, Duration::from_secs(2)).await;
+        server.abort();
+        let output = output.unwrap();
+        let body = output.json["body"].as_str().unwrap();
+        assert!(body.len() <= HTTP_BODY_MAX);
+        assert!(body.ends_with('…'));
+        assert!(!body.contains('\u{fffd}'));
+        assert_eq!(output.json["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn http_timeout_includes_body_after_headers_have_arrived() {
+        let (url, server) = streaming_server(b"partial".to_vec()).await;
+        let request = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url);
+        let result = read_http_response(request, Duration::from_millis(150)).await;
+        server.abort();
+        assert_eq!(result.unwrap_err(), "HTTP request timed out");
+    }
+
+    #[test]
+    fn disabled_slots_shadow_legacy_tools_skills_and_prompt() {
+        let automation: Automation = serde_json::from_value(json!({
+            "nodes": [
+                {"id":"a","type":"action.agent","data":{"agent":{"prompt":"legacy","toolIds":["old"],"skillId":"old-skill"}}},
+                {"id":"t","type":"agent.tool","data":{"disabled":true,"agent":{"toolIds":["write_file"]}}},
+                {"id":"s","type":"agent.skill","data":{"disabled":true,"agent":{"skillIds":["pdf"]}}},
+                {"id":"c","type":"agent.context","data":{"disabled":true,"agent":{"prompt":"disabled"}}}
+            ],
+            "edges": [
+                {"id":"t-a","source":"t","target":"a","targetHandle":"tool"},
+                {"id":"s-a","source":"s","target":"a","targetHandle":"skill"},
+                {"id":"c-a","source":"c","target":"a","targetHandle":"context"}
+            ]
+        })).unwrap();
+        let spec = compose_agent_spec(&automation, &automation.nodes[0]);
+        assert_eq!(spec["toolIds"], json!([]));
+        assert_eq!(spec["skillIds"], json!([]));
+        assert!(spec.get("skillId").is_none());
+        assert_eq!(spec["prompt"], "");
+    }
+
+    #[test]
+    fn production_never_falls_back_to_another_or_disabled_trigger() {
+        let mut disabled = node("s", "trigger.schedule");
+        disabled.data = json!({"disabled":true});
+        let automation = graph(vec![disabled, node("m", "trigger.manual")]);
+        assert!(start_trigger(&automation, RunOrigin::Schedule).is_none());
+        assert!(start_trigger(&automation, RunOrigin::Hotkey).is_none());
+        assert_eq!(
+            start_trigger(&automation, RunOrigin::Manual).unwrap().id,
+            "m"
+        );
+        let only_disabled = graph(vec![automation.nodes[0].clone()]);
+        assert!(start_trigger(&only_disabled, RunOrigin::Manual).is_none());
+    }
 
     fn node(id: &str, node_type: &str) -> FlowNode {
         FlowNode {
@@ -1034,7 +1210,10 @@ mod tests {
             next_node_ids(&automation, "i", Some("false")),
             vec!["no".to_string()]
         );
-        assert_eq!(next_node_ids(&automation, "yes", None), Vec::<String>::new());
+        assert_eq!(
+            next_node_ids(&automation, "yes", None),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -1099,7 +1278,8 @@ mod tests {
         let mut agent = node("a", "action.agent");
         agent.data = json!({ "agent": { "prompt": "legacy" } });
         let mut runtime = node("r", "agent.runtime");
-        runtime.data = json!({ "agent": { "runtimeKind": "chat", "model": "m", "providerId": "p" } });
+        runtime.data =
+            json!({ "agent": { "runtimeKind": "chat", "model": "m", "providerId": "p" } });
         let mut context = node("c", "agent.context");
         context.data = json!({ "agent": { "prompt": "hello {{output}}" } });
         let automation = Automation {
@@ -1210,7 +1390,7 @@ mod tests {
         );
         assert_eq!(
             start_trigger(&automation, RunOrigin::Hotkey).map(|n| n.id.as_str()),
-            Some("s")
+            None
         );
     }
 

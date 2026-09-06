@@ -90,11 +90,9 @@ fn collect_specs(automations: &[Automation]) -> Vec<ScheduleSpec> {
         if !automation.enabled {
             continue;
         }
-        let Some(trigger) = automation
-            .nodes
-            .iter()
-            .find(|node| node.node_type == "trigger.schedule")
-        else {
+        let Some(trigger) = automation.nodes.iter().find(|node| {
+            node.node_type == "trigger.schedule" && !super::interpolate::node_disabled(&node.data)
+        }) else {
             continue;
         };
         let schedule = trigger.data.get("schedule").cloned().unwrap_or_default();
@@ -163,8 +161,14 @@ fn tick_once(app: &AppHandle) -> Duration {
             }
             Due::Wait => {}
         }
-        if let Some(due) = next_fire(&spec.kind, spec.hour, spec.minute, spec.interval_minutes, last, now)
-        {
+        if let Some(due) = next_fire(
+            &spec.kind,
+            spec.hour,
+            spec.minute,
+            spec.interval_minutes,
+            last,
+            now,
+        ) {
             next_wake = Some(match next_wake {
                 Some(cur) if cur <= due => cur,
                 _ => due,
@@ -203,8 +207,7 @@ fn next_fire(
                 if weekdays_only && date.weekday().number_from_monday() > 5 {
                     continue;
                 }
-                let Some(candidate) = date.and_time(time).and_local_timezone(Local).single()
-                else {
+                let Some(candidate) = date.and_time(time).and_local_timezone(Local).single() else {
                     continue;
                 };
                 if candidate > now {
@@ -254,7 +257,11 @@ fn is_due(
             let Some(naive) = NaiveTime::from_hms_opt(hour.min(23), minute.min(59), 0) else {
                 return Due::Wait;
             };
-            let Some(target) = now.date_naive().and_time(naive).and_local_timezone(Local).single()
+            let Some(target) = now
+                .date_naive()
+                .and_time(naive)
+                .and_local_timezone(Local)
+                .single()
             else {
                 return Due::Wait;
             };
@@ -278,6 +285,18 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    #[test]
+    fn disabled_schedule_is_not_armed() {
+        let mut automation: Automation = serde_json::from_value(serde_json::json!({
+            "id":"a", "enabled":true,
+            "nodes":[{"id":"s","type":"trigger.schedule","data":{"disabled":true}}]
+        }))
+        .unwrap();
+        assert!(collect_specs(&[automation.clone()]).is_empty());
+        automation.nodes[0].data["disabled"] = serde_json::json!(false);
+        assert_eq!(collect_specs(&[automation]).len(), 1);
+    }
+
     fn at(hour: u32, minute: u32) -> chrono::DateTime<Local> {
         Local
             .with_ymd_and_hms(2026, 8, 31, hour, minute, 0)
@@ -289,14 +308,8 @@ mod tests {
     fn interval_arms_then_fires() {
         let t0 = at(9, 0);
         assert_eq!(is_due("interval", 9, 0, 60, None, t0), Due::Arm);
-        assert_eq!(
-            is_due("interval", 9, 0, 60, Some(t0), at(9, 30)),
-            Due::Wait
-        );
-        assert_eq!(
-            is_due("interval", 9, 0, 60, Some(t0), at(10, 0)),
-            Due::Fire
-        );
+        assert_eq!(is_due("interval", 9, 0, 60, Some(t0), at(9, 30)), Due::Wait);
+        assert_eq!(is_due("interval", 9, 0, 60, Some(t0), at(10, 0)), Due::Fire);
     }
 
     #[test]

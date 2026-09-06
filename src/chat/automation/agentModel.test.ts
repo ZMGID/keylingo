@@ -2,6 +2,21 @@ import { describe, expect, it } from 'vitest'
 import { composeAgent, explodeInlineAgents, isAgentSlotFilled, normalizeAgent, toAgentData, agentSelectedModel } from './agentModel'
 
 describe('normalizeAgent', () => {
+  it('disabled slots clear their inline fallbacks and do not grant tools or skills', () => {
+    const data = composeAgent('a', [
+      { id: 'a', type: 'action.agent', data: { label: 'a', agent: { prompt: 'legacy', toolIds: ['old-write'], skillId: 'old-skill' } } },
+      { id: 't', type: 'agent.tool', data: { label: 'tool', disabled: true, agent: { prompt: '', toolIds: ['write_file'] } } },
+      { id: 's', type: 'agent.skill', data: { label: 'skill', disabled: true, agent: { prompt: '', skillIds: ['pdf'] } } },
+      { id: 'c', type: 'agent.context', data: { label: 'context', disabled: true, agent: { prompt: 'disabled' } } },
+    ], [
+      { source: 't', target: 'a', targetHandle: 'tool' },
+      { source: 's', target: 'a', targetHandle: 'skill' },
+      { source: 'c', target: 'a', targetHandle: 'context' },
+    ])
+    expect(data.toolIds).toEqual([])
+    expect(data.skillIds).toEqual([])
+    expect(data.prompt).toBe('')
+  })
   it('defaults to builtin Kivio Agent with an empty prompt', () => {
     const agent = normalizeAgent(undefined)
     expect(agent.runtimeKind).toBe('builtin')

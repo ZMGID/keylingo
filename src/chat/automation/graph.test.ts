@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   FLOW_NODE_GAP_Y,
+  FLOW_NODE_MIN_GAP,
   FLOW_ORIGIN,
   canConnect,
   connectNodes,
   createFlowNode,
+  ensureNodeSpacing,
+  nodeVisibleBounds,
   flowEdgeFromConnection,
   layoutFlow,
   pickAppendSource,
@@ -12,12 +15,74 @@ import {
   topologicalOrder,
 } from './graph'
 import { AUTOMATION_SCHEMA_VERSION, type Automation } from './types'
+import { slotAttachPosition } from './agentModel'
 
 function node(id: string, type: 'trigger.manual' | 'action.agent' | 'action.notify' | 'logic.if', x = 0) {
   return createFlowNode(type, { label: id }, { x, y: 0 })
 }
 
 describe('automation graph', () => {
+  function expectSpacing(nodes: Parameters<typeof ensureNodeSpacing>[0]) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodeVisibleBounds(nodes[i])
+        const b = nodeVisibleBounds(nodes[j])
+        expect(a.right + FLOW_NODE_MIN_GAP <= b.left || b.right + FLOW_NODE_MIN_GAP <= a.left
+          || a.bottom + FLOW_NODE_MIN_GAP <= b.top || b.bottom + FLOW_NODE_MIN_GAP <= a.top).toBe(true)
+      }
+    }
+  }
+
+  it('separates imported piles including Agent captions and all four slot nodes', () => {
+    const nodes = ['action.agent', 'action.notify', 'agent.runtime', 'agent.context', 'agent.tool', 'agent.skill'].map((type, i) => ({
+      id: String(i), type, position: { x: 0, y: 0 },
+    }))
+    const spaced = ensureNodeSpacing(nodes)
+    expectSpacing(spaced)
+    expect(spaced[0]).toBe(nodes[0])
+    expect(ensureNodeSpacing(spaced)).toBe(spaced)
+    expect(nodes.every((item) => item.position.x === 0 && item.position.y === 0)).toBe(true)
+  })
+
+  it('moves the dragged node while leaving its stationary neighbor fixed', () => {
+    const dragged = { id: 'dragged', type: 'action.agent', position: { x: 0, y: 0 } }
+    const fixed = { id: 'fixed', type: 'action.notify', position: { x: 30, y: 30 } }
+    const spaced = ensureNodeSpacing([dragged, fixed], new Set(['dragged']))
+    expect(spaced[1]).toBe(fixed)
+    expect(spaced[0].position).not.toEqual(dragged.position)
+    expectSpacing(spaced)
+  })
+
+  it('enforces a gap even when cards do not overlap but captions touch', () => {
+    const nodes = [
+      { id: 'a', type: 'action.notify', position: { x: 0, y: 0 } },
+      { id: 'b', type: 'action.notify', position: { x: 180, y: 0 } },
+    ]
+    expect(ensureNodeSpacing(nodes)).not.toBe(nodes)
+    expectSpacing(ensureNodeSpacing(nodes))
+  })
+
+  it('spaces default satellite positions and repeated tool slots', () => {
+    const agent = { id: 'a', type: 'action.agent', position: { x: 0, y: 0 } }
+    const slots = (['runtime', 'context', 'tool', 'skill'] as const).map((slot) => ({
+      id: slot, type: `agent.${slot}`, position: slotAttachPosition(agent.position, slot),
+    }))
+    expectSpacing([agent, ...slots, { id: 'tool-2', type: 'agent.tool', position: slotAttachPosition(agent.position, 'tool', 1) }])
+  })
+
+  it('separates every node in a dense mixed-size graph', () => {
+    const nodes = Array.from({ length: 60 }, (_, i) => ({
+      id: String(i), type: i % 3 ? 'action.notify' : 'action.agent',
+      position: { x: (i % 8) * 40, y: Math.floor(i / 8) * 24 },
+    }))
+    expectSpacing(ensureNodeSpacing(nodes))
+  })
+
+  it('keeps fan-out and nested branch layouts separated', () => {
+    const nodes = ['t', 'a', 'b', 'c', 'd'].map((id) => ({ ...node(id, id === 't' ? 'trigger.manual' : 'action.notify'), id }))
+    const laid = layoutFlow(nodes, [connectNodes('t', 'a'), connectNodes('t', 'b'), connectNodes('a', 'c'), connectNodes('b', 'd')])
+    expectSpacing(laid)
+  })
   it('允许一连多，目标仍只能有一个入口', () => {
     const trigger = { ...node('t', 'trigger.manual'), id: 't' }
     const agent = { ...node('a', 'action.agent', 200), id: 'a' }

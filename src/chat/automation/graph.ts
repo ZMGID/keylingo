@@ -5,9 +5,60 @@ import { AGENT_SLOTS, FLOW_AGENT_WIDTH, connectSlotEdge, isSlotEdge, resolveSlot
    GAP_Y 要给下方标签留出高度，否则 IF 分叉的两支会叠字。 */
 export const FLOW_NODE_WIDTH = 104
 export { FLOW_AGENT_WIDTH }
-export const FLOW_NODE_GAP_X = 88
-export const FLOW_NODE_GAP_Y = 136
+export const FLOW_NODE_GAP_X = 112
+export const FLOW_NODE_GAP_Y = 216
 export const FLOW_ORIGIN = { x: 72, y: 144 }
+export const FLOW_NODE_MIN_GAP = 24
+
+type PositionedNode = { id: string, type?: string, position: { x: number, y: number } }
+
+/** Include the caption, hover toolbar, output + and Agent slot labels, not just the card. */
+export function nodeVisibleBounds(node: PositionedNode) {
+  const width = nodeCardWidth(node.type)
+  return {
+    left: node.position.x + Math.min(0, (width - 180) / 2),
+    right: node.position.x + Math.max(width + 34, (width + 180) / 2),
+    top: node.position.y - 36,
+    bottom: node.position.y + (node.type === 'action.agent' ? 172 : 128),
+  }
+}
+
+function boundsTooClose(a: ReturnType<typeof nodeVisibleBounds>, b: ReturnType<typeof nodeVisibleBounds>) {
+  return a.left < b.right + FLOW_NODE_MIN_GAP && a.right + FLOW_NODE_MIN_GAP > b.left
+    && a.top < b.bottom + FLOW_NODE_MIN_GAP && a.bottom + FLOW_NODE_MIN_GAP > b.top
+}
+
+/** Keep untouched nodes fixed; move conflicting additions/drags to the nearest free grid position. */
+export function ensureNodeSpacing<N extends PositionedNode>(nodes: N[], movingIds?: ReadonlySet<string>): N[] {
+  const ordered = movingIds
+    ? [...nodes.filter((node) => !movingIds.has(node.id)), ...nodes.filter((node) => movingIds.has(node.id))]
+    : nodes
+  const placed: ReturnType<typeof nodeVisibleBounds>[] = []
+  const adjusted = new Map<string, N>()
+  for (const node of ordered) {
+    const bounds = nodeVisibleBounds(node)
+    if (!placed.some((other) => boundsTooClose(bounds, other))) {
+      placed.push(bounds)
+      continue
+    }
+    const { x, y } = node.position
+    const candidates = placed.flatMap((other) => [
+      { x: Math.ceil((other.right + FLOW_NODE_MIN_GAP - (bounds.left - x)) / 24) * 24, y },
+      { x, y: Math.ceil((other.bottom + FLOW_NODE_MIN_GAP - (bounds.top - y)) / 24) * 24 },
+      { x: Math.floor((other.left - FLOW_NODE_MIN_GAP - (bounds.right - x)) / 24) * 24, y },
+      { x, y: Math.floor((other.top - FLOW_NODE_MIN_GAP - (bounds.bottom - y)) / 24) * 24 },
+    ])
+    candidates.sort((a, b) => (a.x - x) ** 2 + (a.y - y) ** 2 - ((b.x - x) ** 2 + (b.y - y) ** 2))
+    // At least the candidate outside the outermost obstacle is always free.
+    const position = candidates.find((candidate) =>
+      !placed.some((other) => boundsTooClose(nodeVisibleBounds({ ...node, position: candidate }), other)),
+    )!
+    const next = { ...node, position }
+    adjusted.set(node.id, next)
+    placed.push(nodeVisibleBounds(next))
+  }
+  return adjusted.size ? nodes.map((node) => adjusted.get(node.id) ?? node) : nodes
+}
 
 function branchYOffset(handles: string[], handle: string): number {
   const idx = handles.indexOf(handle)
@@ -150,7 +201,7 @@ export function layoutFlow<
     placed.set(node.id, { x: FLOW_ORIGIN.x, y: extraY })
     extraY += FLOW_NODE_GAP_Y
   }
-  return nodes.map((node) => ({ ...node, position: placed.get(node.id)! }))
+  return ensureNodeSpacing(nodes.map((node) => ({ ...node, position: placed.get(node.id)! })))
 }
 
 export function canConnect(

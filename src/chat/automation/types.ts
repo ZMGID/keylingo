@@ -201,6 +201,17 @@ export interface AutomationRunStarted {
   runId: string
 }
 
+export interface AutomationRun extends AutomationRunSummary {
+  automationId: string
+  nodes: Array<{
+    nodeId: string
+    nodeType: string
+    status: string
+    output?: string | null
+    error?: string | null
+  }>
+}
+
 export function isTriggerType(type: string): type is AutomationNodeType {
   return type.startsWith('trigger.')
 }

@@ -577,7 +577,7 @@ async fn run_external_agent_node(
         .map_err(crate::chat::repository::repository_error)?;
 
     let state = app.state::<AppState>();
-    crate::external_agents::run_external_cli_reply(
+    crate::external_agents::run_external_cli_reply_in(
         app,
         &state,
         &mut conversation,
@@ -587,6 +587,7 @@ async fn run_external_agent_node(
         &[],
         spec.skill_ids.first().map(|id| id.as_str()),
         AgentRunEntry::Send,
+        workdir.as_deref(),
     )
     .await?;
 
