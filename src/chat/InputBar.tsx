@@ -636,7 +636,7 @@ export const InputBar = memo(function InputBar({
   // 集：导航态选中的集（项目优先；两者在侧栏互斥）。
   const effectiveSet: { id: string; name: string } | null =
     effectiveProject ? null : (selectedSet ? { id: selectedSet.id, name: selectedSet.name } : null)
-  // 专家入口挂在加号菜单里；有中心跳转才露出。
+  // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
   const modeEntryEnabled = Boolean(onModeChange) && modeOptions.length > 0
   const presetEntryEnabled = Boolean(onPresetChange) && presetOptions.length > 0
@@ -2245,17 +2245,16 @@ export const InputBar = memo(function InputBar({
                 ) : undefined
               }
               sourcesActive={knowledgeBaseIds.length > 0 || webSearchMode !== 'off'}
-              assistantPanel={
-                showAssistantEntry && onOpenAssistantCenter ? (
-                  <AssistantPicker
-                    currentAssistant={currentAssistant}
-                    onSelect={onSelectAssistant ?? (() => {})}
-                    onOpenCenter={onOpenAssistantCenter}
-                  />
-                ) : undefined
-              }
-              assistantHint={currentAssistant?.name ?? null}
             />
+            {showAssistantEntry && onOpenAssistantCenter && (
+              <AssistantPicker
+                currentAssistant={currentAssistant}
+                onSelect={onSelectAssistant ?? (() => {})}
+                onOpenCenter={onOpenAssistantCenter}
+                disabled={disabled}
+                layout={layout}
+              />
+            )}
             {/* 已选项目时这个入口移到状态条（那里是「当前上下文」的位置），
                 工具栏只在未选项目时保留「进入项目」这个动作。 */}
             {projectEntryEnabled && !effectiveProject && (

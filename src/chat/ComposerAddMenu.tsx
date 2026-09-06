@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
-import { Bot, ChevronLeft, ChevronRight, FolderPlus, Folders, Paperclip, Plus, SlidersHorizontal, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FolderPlus, Folders, Paperclip, Plus, SlidersHorizontal, X } from 'lucide-react'
 import { IconButton } from '../components/Button'
 import { ComposerAddMenuCloseContext } from './composerAddMenuContext'
 import { usePopoverMaxHeight } from './usePopoverMaxHeight'
@@ -21,7 +21,7 @@ function displayName(entry: AdditionalDirectory): string {
   return normalized.split('/').filter(Boolean).pop() ?? entry.path
 }
 
-type AddMenuView = 'root' | 'sources' | 'assistants'
+type AddMenuView = 'root' | 'sources'
 
 export function ComposerAddMenu({
   onAddAttachment,
@@ -34,8 +34,6 @@ export function ComposerAddMenu({
   onBeforeOpen,
   sourcesPanel,
   sourcesActive,
-  assistantPanel,
-  assistantHint,
 }: {
   onAddAttachment: () => void | Promise<void>
   directories?: AdditionalDirectory[]
@@ -47,8 +45,6 @@ export function ComposerAddMenu({
   onBeforeOpen?: () => void
   sourcesPanel?: ReactNode
   sourcesActive?: boolean
-  assistantPanel?: ReactNode
-  assistantHint?: string | null
 }) {
   const t = useT()
   const [openMenu, setOpenMenu] = useState(false)
@@ -62,7 +58,6 @@ export function ComposerAddMenu({
   const atLimit = directories.length >= MAX_ADDITIONAL_DIRECTORIES
   const promptOnly = Boolean(externalAgentId && PROMPT_ONLY_AGENTS.has(externalAgentId))
   const primaryNorm = primaryRootPath ? normalizeDirPath(primaryRootPath) : ''
-  const hasNested = Boolean(sourcesPanel || assistantPanel)
 
   const closeMenu = useCallback(() => {
     setOpenMenu(false)
@@ -150,7 +145,7 @@ export function ComposerAddMenu({
   const placement = layout === 'inline' ? 'top-full mt-1.5' : 'bottom-full mb-1.5'
   const origin = layout === 'inline' ? 'top left' : 'bottom left'
   const maxH = usePopoverMaxHeight(openMenu, popoverRef, layout === 'inline' ? 'down' : 'up', 360)
-  const active = directories.length > 0 || Boolean(sourcesActive) || Boolean(assistantHint)
+  const active = directories.length > 0 || Boolean(sourcesActive)
 
   return (
     <ComposerAddMenuCloseContext.Provider value={closeMenu}>
@@ -191,17 +186,6 @@ export function ComposerAddMenu({
                 <div className="kv-menu-sep" />
                 {sourcesPanel}
               </>
-            ) : view === 'assistants' && assistantPanel ? (
-              <>
-                <button type="button" className="kv-menu-item" onClick={() => setView('root')}>
-                  <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
-                    <ChevronLeft size={13} strokeWidth={1.75} />
-                  </span>
-                  <span className="min-w-0 flex-1 truncate font-semibold">{t.chatComposerAssistants}</span>
-                </button>
-                <div className="kv-menu-sep" />
-                {assistantPanel}
-              </>
             ) : (
               <>
                 <button type="button" className="kv-menu-item" disabled={disabled} onClick={pickAttachment}>
@@ -230,40 +214,21 @@ export function ComposerAddMenu({
                     )}
                   </>
                 )}
-                {hasNested && (
+                {sourcesPanel && (
                   <>
                     <div className="kv-menu-sep" />
-                    {sourcesPanel && (
-                      <button
-                        type="button"
-                        className="kv-menu-item"
-                        disabled={disabled}
-                        onClick={() => setView('sources')}
-                      >
-                        <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
-                          <SlidersHorizontal size={13} strokeWidth={1.75} />
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">{t.chatComposerSources}</span>
-                        <ChevronRight size={13} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
-                      </button>
-                    )}
-                    {assistantPanel && (
-                      <button
-                        type="button"
-                        className="kv-menu-item"
-                        disabled={disabled}
-                        onClick={() => setView('assistants')}
-                      >
-                        <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
-                          <Bot size={13} strokeWidth={1.75} />
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">{t.chatComposerAssistants}</span>
-                        {assistantHint && (
-                          <span className="kv-menu-hint max-w-[40%] truncate">{assistantHint}</span>
-                        )}
-                        <ChevronRight size={13} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      className="kv-menu-item"
+                      disabled={disabled}
+                      onClick={() => setView('sources')}
+                    >
+                      <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
+                        <SlidersHorizontal size={13} strokeWidth={1.75} />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{t.chatComposerSources}</span>
+                      <ChevronRight size={13} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
+                    </button>
                   </>
                 )}
                 {canAttachDirs && (

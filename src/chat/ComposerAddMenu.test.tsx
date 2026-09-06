@@ -35,23 +35,18 @@ describe('ComposerAddMenu', () => {
     expect(screen.queryByText('添加文件夹')).toBeNull()
   })
 
-  it('nests sources and assistants under the plus menu', () => {
+  it('nests sources under the plus menu', () => {
     render(
       <ComposerAddMenu
         onAddAttachment={() => undefined}
         sourcesPanel={<div>sources-body</div>}
-        assistantPanel={<div>assistant-body</div>}
-        assistantHint="写作"
       />,
     )
 
     fireEvent.click(screen.getByLabelText('添加'))
     expect(screen.getByText('添加附件')).toBeTruthy()
     expect(screen.getByText('信息来源')).toBeTruthy()
-    expect(screen.getByText('专家')).toBeTruthy()
-    expect(screen.getByText('写作')).toBeTruthy()
     expect(screen.queryByText('sources-body')).toBeNull()
-    expect(screen.queryByText('assistant-body')).toBeNull()
 
     fireEvent.click(screen.getByText('信息来源'))
     expect(screen.getByText('sources-body')).toBeTruthy()
@@ -60,10 +55,5 @@ describe('ComposerAddMenu', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.getByText('添加附件')).toBeTruthy()
     expect(screen.queryByText('sources-body')).toBeNull()
-
-    fireEvent.click(screen.getByText('专家'))
-    expect(screen.getByText('assistant-body')).toBeTruthy()
-    fireEvent.click(screen.getByText('专家'))
-    expect(screen.getByText('添加附件')).toBeTruthy()
   })
 })
